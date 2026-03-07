@@ -46,7 +46,8 @@ echo ""
 echo "Which database would you like to use?"
 echo "1) FalkorDB Lite (default, lightweight, built-in)"
 echo "2) Neo4j (production-grade, requires more resources)"
-read -p "Enter choice [1-2] (default: 1): " db_choice
+echo "3) FalkorDB (separate container, recommended for aarch64)"
+read -p "Enter choice [1-3] (default: 1): " db_choice
 db_choice=${db_choice:-1}
 echo ""
 
@@ -71,6 +72,13 @@ if [ "$db_choice" = "2" ]; then
     echo "   $DOCKER_COMPOSE exec codegraphcontext bash"
     echo "   cgc neo4j setup"
     echo "   (Use URI: bolt://neo4j:7687, Username: neo4j, Password: codegraph123)"
+elif [ "$db_choice" = "3" ]; then
+    echo "🚀 Starting CodeGraphContext with separate FalkorDB container..."
+    DATABASE_TYPE=falkordb-remote FALKORDB_HOST=falkordb $DOCKER_COMPOSE --profile falkordb up -d
+    echo ""
+    echo "✅ Services started!"
+    echo ""
+    echo "💡 Note: The container is configured to use the 'falkordb' service for data storage."
 else
     echo "🚀 Starting CodeGraphContext with FalkorDB Lite..."
     $DOCKER_COMPOSE up -d codegraphcontext
