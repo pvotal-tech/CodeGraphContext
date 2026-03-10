@@ -6,6 +6,15 @@ from pathlib import Path
 import time
 from rich.console import Console
 from rich.table import Table
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    BarColumn,
+    TaskProgressColumn,
+    TimeRemainingColumn,
+    MofNCompleteColumn,
+)
 
 from ..core import get_database_manager
 from ..core.jobs import JobManager
@@ -67,6 +76,64 @@ def _initialize_services():
     return db_manager, graph_builder, code_finder
 
 
+async def _run_index_with_progress(graph_builder: GraphBuilder, path_obj: Path, is_dependency: bool = False):
+    """Internal helper to run indexing with a Live progress bar."""
+    job_id = graph_builder.job_manager.create_job(str(path_obj), is_dependency=is_dependency)
+    
+    # Create the progress bar
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        MofNCompleteColumn(),
+        TimeRemainingColumn(),
+        TextColumn("[dim]{task.fields[filename]}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        
+        task_id = progress.add_task(
+            "Indexing...", 
+            total=None,  # Will be updated once file discovery is done
+            filename=""
+        )
+
+        indexing_task = asyncio.create_task(
+            graph_builder.build_graph_from_path_async(path_obj, is_dependency=is_dependency, job_id=job_id)
+        )
+
+        from ..core.jobs import JobStatus
+        
+        # Poll for updates
+        while not indexing_task.done():
+            job = graph_builder.job_manager.get_job(job_id)
+            if job:
+                if job.total_files > 0:
+                    progress.update(task_id, total=job.total_files, completed=job.processed_files)
+                
+                # Update the current filename in the UI
+                current_file = job.current_file or ""
+                if len(current_file) > 40:
+                    current_file = "..." + current_file[-37:]
+                progress.update(task_id, filename=current_file)
+
+                if job.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
+                    break
+            
+            await asyncio.sleep(0.1)
+
+        # Wait for actual completion and handle final state
+        try:
+            await indexing_task
+            job = graph_builder.job_manager.get_job(job_id)
+            if job and job.status == JobStatus.FAILED:
+                error_msg = job.errors[0] if job.errors else "Unknown error"
+                raise RuntimeError(error_msg)
+        except Exception as e:
+            raise e
+
+
 def index_helper(path: str):
     """Synchronously indexes a repository."""
     time_start = time.time()
@@ -107,13 +174,9 @@ def index_helper(path: str):
             console.print(f"[yellow]Warning: Could not check file count: {e}. Proceeding with indexing...[/yellow]")
 
     console.print(f"Starting indexing for: {path_obj}")
-    console.print("[yellow]This may take a few minutes for large repositories...[/yellow]")
-
-    async def do_index():
-        await graph_builder.build_graph_from_path_async(path_obj, is_dependency=False)
 
     try:
-        asyncio.run(do_index())
+        asyncio.run(_run_index_with_progress(graph_builder, path_obj, is_dependency=False))
         time_end = time.time()
         elapsed = time_end - time_start
         console.print(f"[green]Successfully finished indexing: {path} in {elapsed:.2f} seconds[/green]")
@@ -159,13 +222,9 @@ def add_package_helper(package_name: str, language: str):
         return
 
     console.print(f"Starting indexing for package '{package_name}' at: {package_path}")
-    console.print("[yellow]This may take a few minutes...[/yellow]")
-
-    async def do_index():
-        await graph_builder.build_graph_from_path_async(package_path, is_dependency=True)
 
     try:
-        asyncio.run(do_index())
+        asyncio.run(_run_index_with_progress(graph_builder, package_path, is_dependency=True))
         console.print(f"[green]Successfully finished indexing package: {package_name}[/green]")
     except Exception as e:
         console.print(f"[bold red]An error occurred during package indexing:[/bold red] {e}")
@@ -587,13 +646,9 @@ def reindex_helper(path: str):
             return
     
     console.print(f"[cyan]Re-indexing: {path_obj}[/cyan]")
-    console.print("[yellow]This may take a few minutes for large repositories...[/yellow]")
-
-    async def do_index():
-        await graph_builder.build_graph_from_path_async(path_obj, is_dependency=False)
-
+    
     try:
-        asyncio.run(do_index())
+        asyncio.run(_run_index_with_progress(graph_builder, path_obj, is_dependency=False))
         time_end = time.time()
         elapsed = time_end - time_start
         console.print(f"[green]Successfully re-indexed: {path} in {elapsed:.2f} seconds[/green]")
