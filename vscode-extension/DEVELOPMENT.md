@@ -279,7 +279,7 @@ Follow conventional commits:
 - [ ] Optimize performance for large codebases
 - [ ] Add more graph layout options
 
-### Medium Term (v0.3.0)
+### Medium Term (v0.3.1)
 - [ ] Language Server Protocol (LSP) integration
 - [ ] Custom Cypher query builder UI
 - [ ] Export graph visualizations

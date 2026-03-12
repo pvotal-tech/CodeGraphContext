@@ -4,6 +4,7 @@ import uuid
 import urllib.parse
 from pathlib import Path
 import time
+from typing import Optional
 from rich.console import Console
 from rich.table import Table
 from rich.progress import (
@@ -339,44 +340,55 @@ def cypher_helper_visual(query: str):
         console.print(f"[bold red]An error occurred while executing query:[/bold red] {e}")
     finally:
         db_manager.close_driver()
-
-
 import webbrowser
+import urllib.parse
+from ..viz.server import run_server, set_db_manager
 
-def visualize_helper(query: str):
-    """"Generates a visualization."""
+def visualize_helper(repo_path: Optional[str] = None, port: int = 8000):
+    """"Generates an interactive visualization using the Playground UI."""
     services = _initialize_services()
     if not all(services):
         return
 
     db_manager, _, _ = services
     
-    # Check Backend Type
-    backend = getattr(db_manager, "name", "").lower()
-    if not backend:
-        # Fallback check
-        if "FalkorDB" in db_manager.__class__.__name__:
-            backend = "falkordb"
-        elif "Kuzu" in db_manager.__class__.__name__:
-            backend = "kuzudb"
-        else:
-            backend = "neo4j"
+    # Set the DB manager for the server
+    set_db_manager(db_manager)
+    
+    # Determine the static directory (built React app)
+    static_dir = Path(__file__).parent.parent / "viz" / "dist"
+    if not static_dir.exists():
+        console.print("[yellow]Warning: Visualizer UI assets not found in package. Using fallback static dir.[/yellow]")
+        # Fallback for development
+        static_dir = Path.cwd() / "website" / "dist"
 
-    if backend == "falkordb":
-        _visualize_falkordb(db_manager)
-    elif backend == "kuzudb":
-        _visualize_kuzudb(db_manager)
-    else:
-        try:
-            encoded_query = urllib.parse.quote(query)
-            visualization_url = f"http://localhost:7474/browser/?cmd=edit&arg={encoded_query}"
-            console.print("[green]Graph visualization URL:[/green]")
-            console.print(visualization_url)
-            console.print("Open the URL in your browser to see the graph.")
-        except Exception as e:
-            console.print(f"[bold red]An error occurred while generating URL:[/bold red] {e}")
-        finally:
-            db_manager.close_driver()
+    # Construct the URL
+    backend_url = f"http://localhost:{port}"
+    params = {"backend": backend_url}
+    if repo_path:
+        params["repo_path"] = str(Path(repo_path).resolve())
+    
+    query_string = urllib.parse.urlencode(params)
+    visualization_url = f"{backend_url}/playground?{query_string}"
+    
+    console.print(f"[green]Starting visualizer server on {backend_url}...[/green]")
+    console.print(f"[cyan]Opening Playground UI:[/cyan] {visualization_url}")
+    
+    # Open browser in a separate thread/process if possible, or just before starting server
+    def open_browser():
+        import time
+        time.sleep(1.5) # Give the server a moment to start
+        webbrowser.open(visualization_url)
+    
+    import threading
+    threading.Thread(target=open_browser, daemon=True).start()
+    
+    try:
+        run_server(host="127.0.0.1", port=port, static_dir=str(static_dir))
+    except Exception as e:
+        console.print(f"[bold red]An error occurred while running the server:[/bold red] {e}")
+    finally:
+        db_manager.close_driver()
 
 def _visualize_falkordb(db_manager):
     console.print("[dim]Generating FalkorDB visualization (showing up to 500 relationships)...[/dim]")

@@ -2,3 +2,4 @@ prune website
 prune images
 prune vscode-extension
 prune playground
+recursive-include src/codegraphcontext/viz/dist *

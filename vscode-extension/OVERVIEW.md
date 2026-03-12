@@ -329,7 +329,7 @@ def process_data(data):
 - Add more graph layout options
 - Implement caching
 
-### **Medium Term (v0.3.0)**
+### **Medium Term (v0.3.1)**
 - LSP integration
 - Custom Cypher query builder UI
 - Export graph visualizations

@@ -29,6 +29,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [progressMsg, setProgressMsg] = useState('');
   const [graphData, setGraphData] = useState<GraphData | null>(null);
+  const [isCliMode, setIsCliMode] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -109,8 +110,34 @@ function App() {
     const repo = searchParams.get('repo');
     const token = searchParams.get('token');
     const action = searchParams.get('action');
+    const backend = searchParams.get('backend');
 
-    if (repo) {
+    if (backend) {
+      actionProcessedRef.current = true;
+      setIsCliMode(true);
+      setLoading(true);
+      setProgressMsg('Connecting to CodeGraphContext backend...');
+      
+      const repoPath = searchParams.get('repo_path');
+      const url = `${backend}/api/graph${repoPath ? `?repo_path=${encodeURIComponent(repoPath)}` : ''}`;
+      
+      fetch(url)
+        .then(res => {
+          if (!res.ok) throw new Error(`Server returned ${res.status}`);
+          return res.json();
+        })
+        .then(data => {
+          if (!data.nodes) throw new Error("Invalid graph data received");
+          setGraphData({ nodes: [], edges: [], files: {}, ...data });
+          setLoading(false);
+        })
+        .catch(err => {
+          console.error('Failed to fetch graph from backend:', err);
+          alert(`Failed to connect to CodeGraphContext backend: ${err.message}`);
+          setLoading(false);
+        });
+        
+    } else if (repo) {
        actionProcessedRef.current = true;
        setRepoUrl(repo);
        if (token) setRepoToken(token);
@@ -149,13 +176,35 @@ function App() {
   }, [isResizing]);
 
   useEffect(() => {
-    window.addEventListener('mousemove', resize);
-    window.addEventListener('mouseup', stopResizing);
-    return () => {
-      window.removeEventListener('mousemove', resize);
-      window.removeEventListener('mouseup', stopResizing);
-    };
+     window.addEventListener('mousemove', resize);
+     window.addEventListener('mouseup', stopResizing);
+     return () => {
+       window.removeEventListener('mousemove', resize);
+       window.removeEventListener('mouseup', stopResizing);
+     };
   }, [resize, stopResizing]);
+
+  // Lazy load file content in CLI mode
+  useEffect(() => {
+    if (isCliMode && selectedFile && graphData && !graphData.files[selectedFile]) {
+        const backend = searchParams.get('backend') || '';
+        fetch(`${backend}/api/file?path=${encodeURIComponent(selectedFile)}`)
+            .then(res => res.json())
+            .then(data => {
+                setGraphData(prev => {
+                    if (!prev) return prev;
+                    return {
+                        ...prev,
+                        files: {
+                            ...prev.files,
+                            [selectedFile]: data.content
+                        }
+                    };
+                });
+            })
+            .catch(err => console.error("Failed to fetch file content:", err));
+    }
+}, [selectedFile, isCliMode, graphData, searchParams]);
 
   // Visibility filters
   const [visibleNodeTypes, setVisibleNodeTypes] = useState<Set<string>>(new Set(['file', 'folder', 'class', 'function', 'interface', 'method', 'struct', 'enum', 'namespace', 'module']));
@@ -687,7 +736,7 @@ function App() {
           </div>
 
             {/* Code Panel */}
-            {selectedFile && graphData.files[selectedFile] && (
+            {selectedFile && (
               <div className="w-[450px] border-l border-border-subtle bg-[#0a0a0f] flex flex-col shrink-0 z-10 shadow-[-4px_0_24px_rgba(0,0,0,0.2)]">
                 <div className="flex items-center justify-between px-4 py-3 border-b border-border-subtle/50 bg-[#0d0d14]">
                   <div className="flex items-center gap-2 min-w-0">
@@ -710,20 +759,31 @@ function App() {
                   ref={codePanelRef}
                   className="flex-1 overflow-y-auto scrollbar-thin p-4 text-[13px] font-mono leading-relaxed bg-[#0a0a0f] text-gray-300"
                 >
-                  {graphData.files[selectedFile].split('\n').map((line, i) => (
-                    <div 
-                      key={i} 
-                      data-line={i}
-                      className="flex hover:bg-white/5 px-2 -mx-2 rounded transition-colors"
-                    >
-                      <span className="w-8 shrink-0 text-right pr-4 text-gray-600 select-none">
-                        {i + 1}
-                      </span>
-                      <span className="whitespace-pre-wrap word-break-all flex-1">
-                        {line || ' '}
-                      </span>
+                  {isCliMode && !graphData.files[selectedFile] ? (
+                    <div className="flex flex-col items-center justify-center h-full gap-4 text-text-muted">
+                        <div className="w-8 h-8 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+                        <span>Loading file content...</span>
                     </div>
-                  ))}
+                  ) : graphData.files[selectedFile] ? (
+                    graphData.files[selectedFile].split('\n').map((line: string, i: number) => (
+                        <div 
+                          key={i} 
+                          data-line={i}
+                          className="flex hover:bg-white/5 px-2 -mx-2 rounded transition-colors"
+                        >
+                          <span className="w-8 shrink-0 text-right pr-4 text-gray-600 select-none">
+                            {i + 1}
+                          </span>
+                          <span className="whitespace-pre-wrap word-break-all flex-1">
+                            {line || ' '}
+                          </span>
+                        </div>
+                      ))
+                  ) : (
+                    <div className="flex items-center justify-center h-full text-text-muted">
+                        Source code not available
+                    </div>
+                  )}
                 </div>
               </div>
             )}

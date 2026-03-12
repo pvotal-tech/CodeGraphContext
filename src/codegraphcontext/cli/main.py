@@ -994,15 +994,15 @@ def delete(
         delete_helper(path)
 
 @app.command()
-def visualize(query: Optional[str] = typer.Argument(None, help="The Cypher query to visualize.")):
+def visualize(
+    repo: Optional[str] = typer.Option(None, "--repo", "-r", help="Path to the repository to visualize."),
+    port: int = typer.Option(8000, "--port", "-p", help="Port to run the visualizer server on.")
+):
     """
-    Generates a URL to visualize a Cypher query in the Neo4j Browser.
-    If no query is provided, a default query will be used.
+    Launches the interactive Playground UI to visualize the code graph.
     """
-    if query is None:
-        query = "MATCH p=()-->() RETURN p"
     _load_credentials()
-    visualize_helper(query)
+    visualize_helper(repo, port)
 
 @app.command("list")
 def list_repositories():
@@ -2145,9 +2145,13 @@ def delete_abbrev(
     delete(path, all_repos)
 
 @app.command("v", rich_help_panel="Shortcuts")
-def visualize_abbrev(query: Optional[str] = typer.Argument(None, help="Cypher query")):
+def visualize_abbrev(
+    repo: Optional[str] = typer.Argument(None, help="Path to the repository to visualize."),
+    port: int = typer.Option(8000, "--port", "-p", help="Port to run the visualizer server on.")
+):
     """Shortcut for 'cgc visualize'"""
-    visualize(query)
+    _load_credentials()
+    visualize_helper(repo, port)
 
 @app.command("w", rich_help_panel="Shortcuts")
 def watch_abbrev(path: str = typer.Argument(".", help="Path to watch")):
