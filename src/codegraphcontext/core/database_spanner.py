@@ -304,14 +304,14 @@ class SpannerSessionWrapper:
 
         # Pure GQL fallback for reads (MATCH)
         if not query.strip().upper().startswith("GRAPH"):
-            query = f"GRAPH {self.graph_name} {query}"
+            query = f"GRAPH {self.graph_name}\n{query}"
             
         # Spanner GQL variables are @var instead of $var
         query = re.sub(r'\$(\w+)', r'@\1', query)
         
-        # Rewrite Node_ labels back to their GQL definition if CodeGraphContext requested them directly
-        # Cypher MATCH (f:File) -> GQL MATCH (f:Node_File) actually no, our property graph maps Node_File directly to label `File`
-        # so GQL `MATCH (f:File)` correctly matches label `File` corresponding to table Node_File!
+        # Wrap all node and edge labels in backticks to prevent reserved word collisions (e.g., CONTAINS)
+        query = re.sub(r'\[([a-zA-Z0-9_]*):([a-zA-Z0-9_]+)', r'[\1:`\2`', query)
+        query = re.sub(r'\(([a-zA-Z0-9_]*):([a-zA-Z0-9_]+)', r'(\1:`\2`', query)
         
         return query, parameters, False
 
