@@ -57,7 +57,7 @@ class SpannerDBManager:
                         error_logger(f"Failed to initialize Spanner: {e}")
                         raise
 
-            return SpannerDriverWrapper(self._database_obj, self._graph_name)
+        return SpannerDriverWrapper(self._database_obj, self._graph_name)
 
     def _initialize_schema(self):
         """Creates Node tables, Edge tables, and the Property Graph via DDL if they don't exist."""
