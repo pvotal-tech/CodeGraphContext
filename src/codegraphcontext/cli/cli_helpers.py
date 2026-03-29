@@ -342,6 +342,88 @@ def cypher_helper_visual(query: str):
         db_manager.close_driver()
 
 
+import uvicorn
+import urllib.parse
+from ..viz.server import run_server, set_db_manager
+
+def visualize_helper(repo_path: Optional[str] = None, port: int = 8000):
+    """"Generates an interactive visualization using the Playground UI."""
+    services = _initialize_services()
+    if not all(services):
+        return
+
+    db_manager, _, _ = services
+    
+    # Set the DB manager for the server
+    set_db_manager(db_manager)
+    
+    # Determine the static directory (built React app)
+    # This points to src/codegraphcontext/viz/dist where we build the website
+    # (relative to src/codegraphcontext/cli/cli_helpers.py)
+    # Using .resolve() is more robust for path comparison and existence checks
+    this_file = Path(__file__).resolve()
+    package_root = this_file.parent.parent
+    static_dir = package_root / "viz" / "dist"
+    
+    # Fallback for development if not yet built in viz/dist
+    if not static_dir.exists():
+        # Look for website/dist in the project root (3 levels up from cli/cli_helpers.py, 4 parents)
+        # 1: cli/, 2: codegraphcontext/, 3: src/, 4: project_root/
+        project_root = this_file.parent.parent.parent.parent
+        dev_static_dir = project_root / "website" / "dist"
+        
+        # Also try one level up from package_root just in case of different layouts
+        alt_dev_dir = package_root.parent.parent / "website" / "dist"
+        
+        if dev_static_dir.exists():
+            static_dir = dev_static_dir
+        elif alt_dev_dir.exists():
+            static_dir = alt_dev_dir
+        else:
+            # Last resort: try current working directory
+            cwd_static_dir = Path.cwd() / "website" / "dist"
+            if cwd_static_dir.exists():
+                static_dir = cwd_static_dir
+            else:
+                console.print(f"[yellow]Warning: Visualization assets not found.[/yellow]")
+                console.print(f"[dim]Checked paths:[/dim]")
+                console.print(f"  [dim]- {static_dir}[/dim]")
+                console.print(f"  [dim]- {dev_static_dir}[/dim]")
+                console.print(f"  [dim]- {alt_dev_dir}[/dim]")
+                console.print(f"  [dim]- {cwd_static_dir}[/dim]")
+                console.print("[dim]Please run 'cd website && npm run build' first.[/dim]")
+                # We continue anyway to let the server start (helpful for dev)
+    
+    # Construct the URL
+    backend_url = f"http://localhost:{port}"
+    params = {"backend": backend_url}
+    if repo_path:
+        params["repo_path"] = str(Path(repo_path).resolve())
+    
+    query_string = urllib.parse.urlencode(params)
+    visualization_url = f"{backend_url}/explore?{query_string}"
+    
+    console.print(f"[green]Starting visualizer server on {backend_url}...[/green]")
+    console.print(f"[cyan]Opening Playground UI:[/cyan] {visualization_url}")
+    
+    # Open browser in a separate thread/process if possible, or just before starting server
+    def open_browser():
+        import time
+        import webbrowser
+        time.sleep(1.5) # Give the server a moment to start
+        webbrowser.open(visualization_url)
+    
+    import threading
+    threading.Thread(target=open_browser, daemon=True).start()
+    
+    try:
+        run_server(host="127.0.0.1", port=port, static_dir=str(static_dir))
+    except Exception as e:
+        console.print(f"[bold red]An error occurred while running the server:[/bold red] {e}")
+    finally:
+        db_manager.close_driver()
+
+
 def reindex_helper(path: str):
     """Force re-index by deleting and rebuilding the repository."""
     time_start = time.time()

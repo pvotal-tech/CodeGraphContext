@@ -24,6 +24,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "tree-sitter>=0.21.0",
     "tree-sitter-language-pack>=0.6.0",
+    "tree-sitter-c-sharp>=0.21.0",
     "pyyaml",
     "nbformat",
     "nbconvert>=7.16.6",
@@ -38,6 +39,7 @@ dependencies = [
 parsing = [
     "tree-sitter>=0.21.0",
     "tree-sitter-language-pack>=0.6.0",
+    "tree-sitter-c-sharp>=0.21.0",
 ]
 dev = [
     "pytest>=7.4.0",
