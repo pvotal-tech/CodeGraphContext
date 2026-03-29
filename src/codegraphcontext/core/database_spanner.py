@@ -194,8 +194,10 @@ class SpannerSessionWrapper:
                     results = snapshot.execute_sql(translated_query, params=translated_params)
                     # Convert to list of dicts immediately so we can close snapshot
                     formatted_results = []
-                    fields = [f.name for f in results.fields]
+                    fields = None
                     for row in results:
+                        if fields is None:
+                            fields = [f.name for f in results.fields]
                         formatted_results.append(dict(zip(fields, row)))
                     return SpannerResultWrapper(formatted_results)
                     
