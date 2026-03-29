@@ -1,6 +1,7 @@
 # src/codegraphcontext/core/database_spanner.py
 import os
 import re
+import json
 import threading
 from typing import Optional, Tuple, Dict, Any, List
 
@@ -66,9 +67,10 @@ class SpannerDBManager:
             ("Repository", "path STRING(MAX), name STRING(MAX), is_dependency BOOL"),
             ("File", "path STRING(MAX), name STRING(MAX), relative_path STRING(MAX), is_dependency BOOL"),
             ("Directory", "path STRING(MAX), name STRING(MAX)"),
-            ("Function", "uid STRING(MAX), name STRING(MAX), path STRING(MAX), line_number INT64, cyclomatic_complexity INT64"),
-            ("Class", "uid STRING(MAX), name STRING(MAX), path STRING(MAX), line_number INT64"),
-            ("Variable", "uid STRING(MAX), name STRING(MAX), path STRING(MAX)"),
+            ("Function", "uid STRING(MAX), name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), cyclomatic_complexity INT64, context STRING(MAX), context_type STRING(MAX), class_context STRING(MAX), is_dependency BOOL, decorators ARRAY<STRING(MAX)>, args ARRAY<STRING(MAX)>"),
+            ("Class", "uid STRING(MAX), name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), context STRING(MAX), context_type STRING(MAX), is_dependency BOOL, decorators ARRAY<STRING(MAX)>"),
+            ("Interface", "uid STRING(MAX), name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL, decorators ARRAY<STRING(MAX)>"),
+            ("Variable", "uid STRING(MAX), name STRING(MAX), path STRING(MAX), line_number INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), value STRING(MAX), context STRING(MAX), is_dependency BOOL, type STRING(MAX), class_context STRING(MAX), decorators ARRAY<STRING(MAX)>"),
         ]
         
         rel_tables = [
@@ -174,17 +176,45 @@ class SpannerSessionWrapper:
 
     def run(self, query, **parameters):
         # 1. Translate Query
-        translated_query, translated_params, is_sql = self._translate_query(query, parameters)
+        translations, is_sql = self._translate_query(query, parameters)
         
         try:
             if is_sql:
+                if translations == "SYSTEM_DELETE_CASCADE":
+                    def execute_cascade_deletes(transaction):
+                        path_val = parameters.get("path")
+                        if not path_val: return
+                        
+                        warning_logger(f"Translating unsupported GQL DETACH DELETE into cascading Spanner SQL deletions for path: {path_val}")
+                        
+                        tables_with_path = [
+                            "Node_Function", "Node_Class", "Node_Variable", "Node_Parameter", 
+                            "Node_Record", "Node_Interface", "Node_Struct", "Node_Enum", "Node_Union", 
+                            "Node_Property", "Node_Annotation", "Node_Trait", "Node_Macro",
+                            "Node_File", "Node_Directory", "Node_Repository",
+                        ]
+                        
+                        for table in tables_with_path:
+                            try:
+                                transaction.execute_update(
+                                    f"DELETE FROM {table} WHERE STARTS_WITH(path, @path)",
+                                    params={"path": path_val}
+                                )
+                            except Exception:
+                                pass # Table might not exist or lacks standard path column
+                    
+                    self.database.run_in_transaction(execute_cascade_deletes)
+                    return SpannerResultWrapper([])
+                    
                 def execute_mutation(transaction):
-                    transaction.execute_update(translated_query, params=translated_params)
+                    for sql_query, sql_params in translations:
+                        transaction.execute_update(sql_query, params=sql_params)
                 self.database.run_in_transaction(execute_mutation)
                 return SpannerResultWrapper([])
             else:
+                gql_query, gql_params = translations
                 with self.database.snapshot() as snapshot:
-                    results = snapshot.execute_sql(translated_query, params=translated_params)
+                    results = snapshot.execute_sql(gql_query, params=gql_params)
                     # Convert to list of dicts immediately so we can close snapshot
                     formatted_results = []
                     fields = None
@@ -201,119 +231,179 @@ class SpannerSessionWrapper:
             error_logger(f"Spanner Query failed: {query[:100]}... Error: {e}")
             raise
 
-    def _translate_query(self, query: str, parameters: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
+    def _translate_query(self, query: str, parameters: Dict[str, Any]) -> Tuple[Any, bool]:
         """
-        Translates basic openCypher to Spanner GQL or Spanner SQL (for mutability).
-        Returns (translated_query, parameters, is_sql), where is_sql=True avoids GQL routing.
+        Translates basic openCypher to Spanner GQL or a list of Spanner SQL operations.
+        Returns (translations, is_sql).
+        If is_sql=True, translations is either 'SYSTEM_DELETE_CASCADE' or List[Tuple[str, dict]].
         """
-        # Node MERGE interception
-        # MERGE (var:Label {pk: $param}) SET var += $props
-        # or MERGE (var:Label {pk: $param, ...})
-        merge_node_match = re.search(r'MERGE\s+\((\w+):(\w+)\s*\{([^}]+)\}\)', query)
-        if merge_node_match and "-[" not in query:
-            node_var = merge_node_match.group(1)
-            node_label = merge_node_match.group(2)
+        # Spanner GQL restricts DML DETACH DELETE. Send it to manual cascade.
+        if "DETACH DELETE" in query.upper():
+            return "SYSTEM_DELETE_CASCADE", True
+
+        if "MERGE " in query:
+            sql_ops = []
             
-            # Map Cypher property SET statements
-            set_match = re.search(r'SET\s+' + node_var + r'\s*\+=\s*\$(\w+)', query)
-            props_dict = {}
-            if set_match:
-                param_name = set_match.group(1)
-                props_dict = parameters.get(param_name, {})
-            
-            # Reconstruct parameter dict for Spanner SQL
-            sql_params = {}
-            
-            # Handle the PK fields
-            pk_fields = merge_node_match.group(3).split(',')
-            for field in pk_fields:
-                if ':' in field:
-                    k, v_raw = field.split(':', 1)
-                    k = k.strip()
-                    v_raw = v_raw.strip()
-                    # Determine if value is a parameter or literal
-                    if v_raw.startswith('$'):
-                        target_param = v_raw[1:]
-                        sql_params[k] = parameters.get(target_param)
-                    else:
-                        # Strip quotes for literal
-                        sql_params[k] = v_raw.strip('"\'')
-            
-            for k, v in props_dict.items():
-                if isinstance(v, (dict, list)) and k not in ['args', 'decorators']:
-                    continue
-                sql_params[k] = v
+            # 1. Node MERGE extraction
+            # e.g., MERGE (var:Label {pk: $param, ...})
+            for merge_node_match in re.finditer(r'MERGE\s+\(([a-zA-Z0-9_]+):([a-zA-Z0-9_]+)\s*\{([^}]+)\}\)', query):
+                node_var = merge_node_match.group(1)
+                node_label = merge_node_match.group(2)
                 
-            cols = list(sql_params.keys())
-            vals = [f"@{c}" for c in cols]
-            
-            sql_query = f"INSERT OR UPDATE Node_{node_label} ({', '.join(cols)}) VALUES ({', '.join(vals)})"
-            return sql_query, sql_params, True
-
-        # Edge MERGE interception
-        # MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-        # or MERGE (a)-[:CONTAINS]->(b)
-        merge_edge_match = re.search(r'MERGE\s+\((\w+)\)-\[:(\w+)(?:\s*\{([^}]+)\})?\]->\((\w+)\)', query)
-        if merge_edge_match:
-            src_var = merge_edge_match.group(1)
-            edge_label = merge_edge_match.group(2)
-            edge_props_raw = merge_edge_match.group(3) or ""
-            dst_var = merge_edge_match.group(4)
-            
-            def guess_node_type(var_name):
-                var_mapping = {
-                    'r': 'Repository', 'f': 'File', 'd': 'Directory', 'm': 'Module',
-                    'c': 'Class', 'fn': 'Function', 'caller': 'Function', 'called': 'Function',
-                    'final_target': 'Function', 'final_caller': 'Function', 'child': 'Class', 'parent': 'Class',
-                    'p': 'Repository', 'mod': 'Module', 'outer': 'Module', 'inner': 'Module',
-                    'iface': 'Interface'
-                }
-                return var_mapping.get(var_name, var_name.capitalize())
-
-            src_type = guess_node_type(src_var)
-            dst_type = guess_node_type(dst_var)
-            
-            # Map CodeGraphContext's internal edge source/dest PK mappings implicitly sent by driver
-            def guess_pk_name(ntype):
-                if ntype in ['Repository', 'File', 'Directory']: return 'path'
-                if ntype in ['Module']: return 'name'
-                return 'uid'
+                sql_params = {}
                 
-            src_pk = guess_pk_name(src_type)
-            dst_pk = guess_pk_name(dst_type)
-
-            sql_params = {
-                "src_id": parameters.get(f"{src_var}_pk", parameters.get(src_pk, f"dummy_{src_var}")),
-                "dst_id": parameters.get(f"{dst_var}_pk", parameters.get(dst_pk, f"dummy_{dst_var}"))
-            }
-
-            if edge_props_raw:
-                for field in edge_props_raw.split(','):
+                # Handle PK mapping
+                pk_fields = merge_node_match.group(3).split(',')
+                for field in pk_fields:
                     if ':' in field:
                         k, v_raw = field.split(':', 1)
                         k = k.strip()
-                        target_param = v_raw.strip()[1:]
-                        if target_param in parameters:
-                            sql_params[k] = parameters[target_param]
-            
-            cols = list(sql_params.keys())
-            vals = [f"@{c}" for c in cols]
-            table_name = f"EdgeT_{edge_label}_{src_type}_{dst_type}"
-            sql_query = f"INSERT OR UPDATE {table_name} ({', '.join(cols)}) VALUES ({', '.join(vals)})"
-            return sql_query, sql_params, True
+                        v_raw = v_raw.strip()
+                        if v_raw.startswith('$'):
+                            sql_params[k] = parameters.get(v_raw[1:])
+                        else:
+                            sql_params[k] = v_raw.strip('"\'')
+                
+                # Associated SET statements
+                # e.g., SET var += $props
+                set_plus_match = re.search(r'SET\s+' + node_var + r'\s*\+=\s*\$([a-zA-Z0-9_]+)', query)
+                if set_plus_match:
+                    prop_name = set_plus_match.group(1)
+                    props_dict = parameters.get(prop_name, {})
+                    for k, v in props_dict.items():
+                        if isinstance(v, (dict, list)) and k not in ['args', 'decorators']:
+                            continue
+                        sql_params[k] = v
+                        
+                # e.g., SET var.prop = $val
+                for set_prop_match in re.finditer(r'SET\s+' + node_var + r'\.([a-zA-Z0-9_]+)\s*=\s*\$([a-zA-Z0-9_]+)', query):
+                    prop_k = set_prop_match.group(1)
+                    prop_v_param = set_prop_match.group(2)
+                    if prop_v_param in parameters:
+                        sql_params[prop_k] = parameters[prop_v_param]
+                        
+                cols = []
+                vals = []
+                final_sql_params = {}
+                for c, v in sql_params.items():
+                    if isinstance(v, dict):
+                        cols.append(c)
+                        vals.append(f"PARSE_JSON(@{c})")
+                        final_sql_params[c] = json.dumps(v)
+                    else:
+                        cols.append(c)
+                        vals.append(f"@{c}")
+                        final_sql_params[c] = v
+                        
+                sql_query = f"INSERT OR UPDATE Node_{node_label} ({', '.join(cols)}) VALUES ({', '.join(vals)})"
+                sql_ops.append((sql_query, final_sql_params))
+
+            # 2. Edge MERGE extraction
+            # e.g., MERGE (a)-[r:LABEL {props}]->(b) or MERGE (a)-[:LABEL]->(b)
+            # Regex expects optionally a variable, then a colon, then the label.
+            for merge_edge_match in re.finditer(r'MERGE\s+\(([a-zA-Z0-9_]+)\)-\[(?:([a-zA-Z0-9_]+)\s*)?:([a-zA-Z0-9_]+)(?:\s*\{([^}]+)\})?\]->\(([a-zA-Z0-9_]+)\)', query):
+                src_var = merge_edge_match.group(1)
+                edge_var = merge_edge_match.group(2) # might be None
+                edge_label = merge_edge_match.group(3)
+                edge_props_raw = merge_edge_match.group(4) or ""
+                dst_var = merge_edge_match.group(5)
+                
+                def get_node_type_from_query(var_name):
+                    m = re.search(r'\(\s*' + re.escape(var_name) + r'\s*:\s*([a-zA-Z0-9_]+)', query)
+                    if m: return m.group(1)
+                    var_mapping = {
+                        'r': 'Repository', 'f': 'File', 'd': 'Directory', 'm': 'Module',
+                        'c': 'Class', 'fn': 'Function', 'caller': 'Function', 'called': 'Function',
+                        'final_target': 'Function', 'final_caller': 'Function', 'child': 'Class', 'parent': 'Class',
+                        'p': 'Repository', 'mod': 'Module', 'outer': 'Module', 'inner': 'Module',
+                        'iface': 'Interface'
+                    }
+                    return var_mapping.get(var_name, var_name.capitalize())
+
+                src_type = get_node_type_from_query(src_var)
+                dst_type = get_node_type_from_query(dst_var)
+                
+                def guess_pk_name(ntype):
+                    if ntype in ['Repository', 'File', 'Directory']: return 'path'
+                    if ntype in ['Module']: return 'name'
+                    return 'uid'
+                    
+                src_pk = guess_pk_name(src_type)
+                dst_pk = guess_pk_name(dst_type)
+
+                sql_params = {
+                    "src_id": parameters.get(f"{src_var}_pk", parameters.get(src_pk, f"dummy_{src_var}")),
+                    "dst_id": parameters.get(f"{dst_var}_pk", parameters.get(dst_pk, f"dummy_{dst_var}"))
+                }
+
+                if edge_props_raw:
+                    for field in edge_props_raw.split(','):
+                        if ':' in field:
+                            k, v_raw = field.split(':', 1)
+                            k = k.strip()
+                            target_param = v_raw.strip()[1:]
+                            if target_param in parameters:
+                                sql_params[k] = parameters[target_param]
+                                
+                # Also handle SET r += $props if an edge var was bound
+                if edge_var:
+                    set_edge_plus_match = re.search(r'SET\s+' + edge_var + r'\s*\+=\s*\$([a-zA-Z0-9_]+)', query)
+                    if set_edge_plus_match:
+                        prop_name = set_edge_plus_match.group(1)
+                        props_dict = parameters.get(prop_name, {})
+                        for k, v in props_dict.items():
+                            sql_params[k] = v
+
+                cols = []
+                vals = []
+                final_sql_params = {}
+                for c, v in sql_params.items():
+                    if isinstance(v, dict):
+                        cols.append(c)
+                        vals.append(f"PARSE_JSON(@{c})")
+                        final_sql_params[c] = json.dumps(v)
+                    else:
+                        cols.append(c)
+                        vals.append(f"@{c}")
+                        final_sql_params[c] = v
+
+                table_name = f"EdgeT_{edge_label}_{src_type}_{dst_type}"
+                sql_query = f"INSERT OR UPDATE {table_name} ({', '.join(cols)}) VALUES ({', '.join(vals)})"
+                sql_ops.append((sql_query, final_sql_params))
+
+            if sql_ops:
+                return sql_ops, True
 
         # Pure GQL fallback for reads (MATCH)
-        if not query.strip().upper().startswith("GRAPH"):
-            query = f"GRAPH {self.graph_name}\n{query}"
+        gql_query = query
+        if not gql_query.strip().upper().startswith("GRAPH"):
+            gql_query = f"GRAPH {self.graph_name}\n{gql_query}"
             
         # Spanner GQL variables are @var instead of $var
-        query = re.sub(r'\$(\w+)', r'@\1', query)
+        gql_query = re.sub(r'\$(\w+)', r'@\1', gql_query)
         
-        # Wrap all node and edge labels in backticks to prevent reserved word collisions (e.g., CONTAINS)
-        query = re.sub(r'\[([a-zA-Z0-9_]*):([a-zA-Z0-9_]+)', r'[\1:`\2`', query)
-        query = re.sub(r'\(([a-zA-Z0-9_]*):([a-zA-Z0-9_]+)', r'(\1:`\2`', query)
+        # Translate Cypher string matching operators to Spanner Google SQL equivalents
+        expr_pat = r'((?:\w+\([\w\.@\'"]+\))|[\w\.@\'"]+)'
+        gql_query = re.sub(rf'(?i){expr_pat}\s+CONTAINS\s+{expr_pat}', r'STRPOS(\1, \2) > 0', gql_query)
+        gql_query = re.sub(rf'(?i){expr_pat}\s+STARTS\s+WITH\s+{expr_pat}', r'STARTS_WITH(\1, \2)', gql_query)
+        gql_query = re.sub(rf'(?i){expr_pat}\s+ENDS\s+WITH\s+{expr_pat}', r'ENDS_WITH(\1, \2)', gql_query)
         
-        return query, parameters, False
+        # Translate Cypher functions
+        gql_query = re.sub(r'(?i)\btoLower\(', 'LOWER(', gql_query)
+        
+        # Wrap all node and edge labels in backticks to prevent reserved word collisions
+        gql_query = re.sub(r'\[([a-zA-Z0-9_]*):([a-zA-Z0-9_]+)', r'[\1:`\2`', gql_query)
+        gql_query = re.sub(r'\(([a-zA-Z0-9_]*):([a-zA-Z0-9_]+)', r'(\1:`\2`', gql_query)
+        
+        # Guard against nested dicts leaking into GQL execution engine
+        safe_parameters = {}
+        for k, v in parameters.items():
+            if isinstance(v, (dict, list)):
+                safe_parameters[k] = str(v)
+            else:
+                safe_parameters[k] = v
+
+        return (gql_query, safe_parameters), False
 
 class SpannerDriverWrapper:
     def __init__(self, database_obj, graph_name):
