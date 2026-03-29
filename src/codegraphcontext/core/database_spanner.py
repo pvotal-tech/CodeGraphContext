@@ -25,8 +25,8 @@ class SpannerDBManager:
         if hasattr(self, '_initialized'):
             return
 
-        self._instance_id = os.getenv('SPANNER_INSTANCE_ID')
-        self._database_id = os.getenv('SPANNER_DATABASE_ID')
+        self._instance_id = os.getenv('SPANNER_INSTANCE_ID', 'my-spanner-instance')
+        self._database_id = os.getenv('SPANNER_DATABASE_ID', 'my-graph-database')
         self._graph_name = os.getenv('SPANNER_GRAPH_NAME', 'CodeGraph')
         
         self.name = 'spanner'
@@ -40,8 +40,9 @@ class SpannerDBManager:
                         from google.cloud import spanner
                         import google.auth
                         
-                        info_logger(f"Initializing Spanner at {self._instance_id}/{self._database_id}")
-                        self._client = spanner.Client(disable_builtin_metrics=True)
+                        project_id = os.environ.get("GOOGLE_CLOUD_PROJECT", os.environ.get("GCP_PROJECT", None))
+                        info_logger(f"Initializing Spanner at {self._instance_id}/{self._database_id} in {project_id}")
+                        self._client = spanner.Client(project=project_id, disable_builtin_metrics=True)
                         
                         self._initialize_schema()
                         info_logger("Spanner connection established and schema verified")
@@ -264,17 +265,11 @@ class SpannerSessionWrapper:
             edge_props_raw = merge_edge_match.group(3) or ""
             dst_var = merge_edge_match.group(4)
             
-            # To know which exact edge table to insert into, we need to know the Source Label and Dest Label.
-            # Cypher often builds these implicitly because the variables are bound in a prior MATCH.
-            # Without an AST parser evaluating bound context types, we assume standard CodeGraphContext usage.
-            # Example known mapping trick: CodeGraphContext uses predictable variables.
-            # "f" for File, "r" for Repository, "m" for Module, "c" for Class, 
-            # "fn" or "caller" or "called" for Function, "d" for Directory, etc.
             def guess_node_type(var_name):
                 var_mapping = {
                     'r': 'Repository', 'f': 'File', 'd': 'Directory', 'm': 'Module',
                     'c': 'Class', 'fn': 'Function', 'caller': 'Function', 'called': 'Function',
-                    'final_target': 'Function', 'child': 'Class', 'parent': 'Class',
+                    'final_target': 'Function', 'final_caller': 'Function', 'child': 'Class', 'parent': 'Class',
                     'p': 'Repository', 'mod': 'Module', 'outer': 'Module', 'inner': 'Module',
                     'iface': 'Interface'
                 }
@@ -283,7 +278,7 @@ class SpannerSessionWrapper:
             src_type = guess_node_type(src_var)
             dst_type = guess_node_type(dst_var)
             
-            # Map CodeGraphContext's internal edge source/dest PK mappings
+            # Map CodeGraphContext's internal edge source/dest PK mappings implicitly sent by driver
             def guess_pk_name(ntype):
                 if ntype in ['Repository', 'File', 'Directory']: return 'path'
                 if ntype in ['Module']: return 'name'
@@ -293,8 +288,8 @@ class SpannerSessionWrapper:
             dst_pk = guess_pk_name(dst_type)
 
             sql_params = {
-                f"src_{src_pk}": parameters.get(f"{src_var}_pk", parameters.get(src_pk, f"dummy_{src_var}")),
-                f"dst_{dst_pk}": parameters.get(f"{dst_var}_pk", parameters.get(dst_pk, f"dummy_{dst_var}"))
+                "src_id": parameters.get(f"{src_var}_pk", parameters.get(src_pk, f"dummy_{src_var}")),
+                "dst_id": parameters.get(f"{dst_var}_pk", parameters.get(dst_pk, f"dummy_{dst_var}"))
             }
 
             if edge_props_raw:

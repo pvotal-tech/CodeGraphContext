@@ -24,7 +24,7 @@ from importlib.metadata import version as pkg_version, PackageNotFoundError
 
 from codegraphcontext.server import MCPServer
 from codegraphcontext.core.database import DatabaseManager
-from .setup_wizard import run_neo4j_setup_wizard, configure_mcp_client
+from .setup_wizard import run_neo4j_setup_wizard, configure_mcp_client, run_spanner_setup_wizard
 from . import config_manager
 # Import the new helper functions
 from .cli_helpers import (
@@ -34,7 +34,6 @@ from .cli_helpers import (
     delete_helper,
     cypher_helper,
     cypher_helper_visual,
-    visualize_helper,
     reindex_helper,
     clean_helper,
     stats_helper,
@@ -64,16 +63,14 @@ def _configure_library_loggers():
 _configure_library_loggers()
 
 
-# Import visualization module
-from .visualizer import (
-    visualize_call_graph,
-    visualize_call_chain,
-    visualize_dependencies,
-    visualize_inheritance_tree,
-    visualize_overrides,
-    visualize_search_results,
-    check_visual_flag,
-)
+# Visualizer was removed upstream. Provide dummy functions to allow the CLI to load.
+def visualize_call_graph(*args, **kwargs): console.print("Visualizer has been removed.")
+def visualize_call_chain(*args, **kwargs): console.print("Visualizer has been removed.")
+def visualize_dependencies(*args, **kwargs): console.print("Visualizer has been removed.")
+def visualize_inheritance_tree(*args, **kwargs): console.print("Visualizer has been removed.")
+def visualize_overrides(*args, **kwargs): console.print("Visualizer has been removed.")
+def visualize_search_results(*args, **kwargs): console.print("Visualizer has been removed.")
+def check_visual_flag(*args, **kwargs): return False
 
 # Initialize the Typer app and Rich console for formatted output.
 app = typer.Typer(
@@ -213,6 +210,26 @@ def neo4j_setup_alias():
     neo4j_setup()
 
 
+# Create Spanner command group
+spanner_app = typer.Typer(help="Spanner database configuration commands")
+app.add_typer(spanner_app, name="spanner")
+
+@spanner_app.command("setup")
+def spanner_setup():
+    """
+    Configure Google Cloud Spanner Database Connection.
+    """
+    console.print("\n[bold cyan]Spanner Database Setup[/bold cyan]")
+    console.print("Configure Spanner database connection for CodeGraphContext.\n")
+    run_spanner_setup_wizard()
+
+# Abbreviation for spanner setup
+@app.command("s", rich_help_panel="Shortcuts")
+def spanner_setup_alias():
+    """Shortcut for 'cgc spanner setup'"""
+    spanner_setup()
+
+
 # ============================================================================
 # CREDENTIALS LOADING PRECEDENCE
 # ============================================================================
@@ -344,6 +361,8 @@ def _load_credentials():
         console.print("[cyan]Using database: FalkorDB Lite[/cyan]")
     elif default_db == "kuzudb":
         console.print("[cyan]Using database: KùzuDB[/cyan]")
+    elif default_db == "spanner":
+        console.print(f"[cyan]Using database: Spanner (project: {os.environ.get('GOOGLE_CLOUD_PROJECT', 'default')}, instance: {os.environ.get('SPANNER_INSTANCE_ID', 'default')}, database: {os.environ.get('SPANNER_DATABASE_ID', 'default')})[/cyan]")
     elif default_db == "falkordb-remote":
         host = os.environ.get("FALKORDB_HOST")
         if host:
@@ -993,16 +1012,7 @@ def delete(
         
         delete_helper(path)
 
-@app.command()
-def visualize(
-    repo: Optional[str] = typer.Option(None, "--repo", "-r", help="Path to the repository to visualize."),
-    port: int = typer.Option(8000, "--port", "-p", help="Port to run the visualizer server on.")
-):
-    """
-    Launches the interactive UI to visualize the code graph.
-    """
-    _load_credentials()
-    visualize_helper(repo, port)
+
 
 @app.command("list")
 def list_repositories():
@@ -2144,14 +2154,7 @@ def delete_abbrev(
     """Shortcut for 'cgc delete'"""
     delete(path, all_repos)
 
-@app.command("v", rich_help_panel="Shortcuts")
-def visualize_abbrev(
-    repo: Optional[str] = typer.Argument(None, help="Path to the repository to visualize."),
-    port: int = typer.Option(8000, "--port", "-p", help="Port to run the visualizer server on.")
-):
-    """Shortcut for 'cgc visualize'"""
-    _load_credentials()
-    visualize_helper(repo, port)
+
 
 @app.command("w", rich_help_panel="Shortcuts")
 def watch_abbrev(path: str = typer.Argument(".", help="Path to watch")):
