@@ -305,7 +305,7 @@ class SpannerSessionWrapper:
             
             cols = list(sql_params.keys())
             vals = [f"@{c}" for c in cols]
-            table_name = f"Edge_{edge_label}_{src_type}_{dst_type}"
+            table_name = f"EdgeT_{edge_label}_{src_type}_{dst_type}"
             sql_query = f"INSERT OR UPDATE {table_name} ({', '.join(cols)}) VALUES ({', '.join(vals)})"
             return sql_query, sql_params, True
 
