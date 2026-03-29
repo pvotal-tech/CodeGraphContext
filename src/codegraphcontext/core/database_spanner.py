@@ -12,6 +12,7 @@ class SpannerDBManager:
     _client = None
     _instance_id = None
     _database_id = None
+    _database_obj = None
     _lock = threading.Lock()
 
     def __new__(cls):
@@ -44,6 +45,9 @@ class SpannerDBManager:
                         info_logger(f"Initializing Spanner at {self._instance_id}/{self._database_id} in {project_id}")
                         self._client = spanner.Client(project=project_id, disable_builtin_metrics=True)
                         
+                        instance = self._client.instance(self._instance_id)
+                        self._database_obj = instance.database(self._database_id)
+                        
                         self._initialize_schema()
                         info_logger("Spanner connection established and schema verified")
                     except ImportError:
@@ -53,7 +57,7 @@ class SpannerDBManager:
                         error_logger(f"Failed to initialize Spanner: {e}")
                         raise
 
-        return SpannerDriverWrapper(self._client, self._instance_id, self._database_id, self._graph_name)
+            return SpannerDriverWrapper(self._database_obj, self._graph_name)
 
     def _initialize_schema(self):
         """Creates Node tables, Edge tables, and the Property Graph via DDL if they don't exist."""
@@ -73,10 +77,6 @@ class SpannerDBManager:
             ("IMPORTS", "FROM File TO Module")
         ]
         
-        from google.cloud import spanner
-        instance = self._client.instance(self._instance_id)
-        database = instance.database(self._database_id)
-        
         info_logger("Spanner Graph backend depends on strict schema definitions.")
         info_logger("To apply this schema dynamically, explicit DDL construction is required.")
 
@@ -86,11 +86,9 @@ class SpannerDBManager:
             self._client = None
 
     def is_connected(self) -> bool:
-        if self._client is None: return False
+        if self._client is None or self._database_obj is None: return False
         try:
-            instance = self._client.instance(self._instance_id)
-            db = instance.database(self._database_id)
-            with db.snapshot() as snapshot:
+            with self._database_obj.snapshot() as snapshot:
                 snapshot.execute_sql("SELECT 1")
             return True
         except Exception:
@@ -164,10 +162,8 @@ class SpannerResultWrapper:
 
 
 class SpannerSessionWrapper:
-    def __init__(self, client, instance_id, database_id, graph_name):
-        self.client = client
-        self.instance_id = instance_id
-        self.database_id = database_id
+    def __init__(self, database_obj, graph_name):
+        self.database = database_obj
         self.graph_name = graph_name
     
     def __enter__(self):
@@ -181,16 +177,13 @@ class SpannerSessionWrapper:
         translated_query, translated_params, is_sql = self._translate_query(query, parameters)
         
         try:
-            instance = self.client.instance(self.instance_id)
-            database = instance.database(self.database_id)
-            
             if is_sql:
                 def execute_mutation(transaction):
                     transaction.execute_update(translated_query, params=translated_params)
-                database.run_in_transaction(execute_mutation)
+                self.database.run_in_transaction(execute_mutation)
                 return SpannerResultWrapper([])
             else:
-                with database.snapshot() as snapshot:
+                with self.database.snapshot() as snapshot:
                     results = snapshot.execute_sql(translated_query, params=translated_params)
                     # Convert to list of dicts immediately so we can close snapshot
                     formatted_results = []
@@ -323,14 +316,12 @@ class SpannerSessionWrapper:
         return query, parameters, False
 
 class SpannerDriverWrapper:
-    def __init__(self, client, instance_id, database_id, graph_name):
-        self.client = client
-        self.instance_id = instance_id
-        self.database_id = database_id
+    def __init__(self, database_obj, graph_name):
+        self.database = database_obj
         self.graph_name = graph_name
         
     def session(self):
-        return SpannerSessionWrapper(self.client, self.instance_id, self.database_id, self.graph_name)
+        return SpannerSessionWrapper(self.database, self.graph_name)
         
     def close(self):
         pass
