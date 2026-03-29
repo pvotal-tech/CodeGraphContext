@@ -177,16 +177,13 @@ class SpannerSessionWrapper:
 
     def run(self, query, **parameters):
         # 1. Translate Query
-        translated_query, translated_params = self._translate_query(query, parameters)
+        translated_query, translated_params, is_sql = self._translate_query(query, parameters)
         
         try:
-            # We must detect if it's a mutation or a read query
-            is_mutation = 'INSERT' in translated_query or 'UPDATE' in translated_query or 'DELETE' in translated_query
-            
             instance = self.client.instance(self.instance_id)
             database = instance.database(self.database_id)
             
-            if is_mutation:
+            if is_sql:
                 def execute_mutation(transaction):
                     transaction.execute_update(translated_query, params=translated_params)
                 database.run_in_transaction(execute_mutation)
