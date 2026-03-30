@@ -483,9 +483,10 @@ def clean_helper():
     console.print("[cyan]🧹 Cleaning database (removing orphaned nodes)...[/cyan]")
     
     try:
-        # Determine if we're using FalkorDB or Neo4j for query optimization
+        # Determine backend type for query compatibility
         db_type = db_manager.__class__.__name__
         is_falkordb = "Falkor" in db_type
+        is_kuzu = "Kuzu" in db_type
         
         total_deleted = 0
         batch_size = 1000
@@ -493,14 +494,15 @@ def clean_helper():
         with db_manager.get_driver().session() as session:
             # Keep deleting orphaned nodes in batches until none are found
             while True:
-                if is_falkordb:
-                    # FalkorDB-compatible query using OPTIONAL MATCH
+                if is_falkordb or is_kuzu:
+                    # FalkorDB / KùzuDB-compatible query using OPTIONAL MATCH
+                    # (KùzuDB does not support the Neo4j `NOT EXISTS { MATCH ... }` subquery syntax)
                     query = """
                     MATCH (n)
                     WHERE NOT (n:Repository)
-                    OPTIONAL MATCH path = (n)-[*..10]-(r:Repository)
-                    WITH n, path
-                    WHERE path IS NULL
+                    OPTIONAL MATCH p = (n)-[*..10]-(r:Repository)
+                    WITH n, p
+                    WHERE p IS NULL
                     WITH n LIMIT $batch_size
                     DETACH DELETE n
                     RETURN count(n) as deleted

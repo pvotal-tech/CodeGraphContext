@@ -210,6 +210,12 @@ class GraphBuilder:
             except Exception as e:
                 warning_logger(f"Schema creation warning: {e}")
 
+    # Neo4j RANGE indexes have an ~8 kB key-size limit.  Long C++ template
+    # function names (e.g. from llama.cpp) can exceed this, causing
+    # "Property value is too large to index" errors.  We cap string properties
+    # at 4096 chars, which is comfortably under the 8 kB boundary.
+    _MAX_STR_LEN = 4096
+
     @staticmethod
     def _sanitize_props(props: Dict) -> Dict:
         """Return a copy of *props* with all values coerced to database-safe types.
@@ -220,8 +226,14 @@ class GraphBuilder:
         parsers (e.g. C's ``detailed_args`` or Scala's tuple ``class_context``)
         are serialized to a JSON string so the data is preserved rather than
         being silently dropped.
+
+        Additionally, string values are truncated to _MAX_STR_LEN characters to
+        avoid Neo4j's RANGE-index 8 kB property-size limit (triggered by very
+        long C++ template-mangled function names).
         """
         import json
+
+        MAX = GraphBuilder._MAX_STR_LEN
 
         def _is_primitive(v):
             return isinstance(v, (str, int, float, bool)) or v is None
@@ -230,15 +242,21 @@ class GraphBuilder:
             return isinstance(v, list) and all(_is_primitive(item) for item in v)
 
         def _coerce(v):
+            if isinstance(v, str):
+                # Truncate long strings to stay within Neo4j RANGE index limits
+                return v[:MAX] if len(v) > MAX else v
             if _is_primitive(v):
                 return v
             if _is_flat_list(v):
-                return v
+                # Truncate any long strings in lists too
+                return [s[:MAX] if isinstance(s, str) and len(s) > MAX else s for s in v]
             # Tuples, dicts, lists-of-dicts, nested structures → JSON string
             try:
-                return json.dumps(v, default=str)
+                serialized = json.dumps(v, default=str)
+                return serialized[:MAX] if len(serialized) > MAX else serialized
             except Exception:
-                return str(v)
+                s = str(v)
+                return s[:MAX] if len(s) > MAX else s
 
         return {k: _coerce(v) for k, v in props.items()}
 
@@ -446,8 +464,20 @@ class GraphBuilder:
                     # before writing to the database to avoid runtime errors such as
                     # "Property values can only be of primitive types or arrays of
                     # primitive types" raised by FalkorDB / KùzuDB.
+                    # _sanitize_props also truncates long strings to avoid Neo4j's
+                    # 8 kB RANGE-index limit (seen with long C++ template names).
                     safe_props = self._sanitize_props(item)
-                    session.run(query, path=file_path_str, name=item['name'], line_number=item['line_number'], props=safe_props)
+                    try:
+                        session.run(query, path=file_path_str, name=item['name'], line_number=item['line_number'], props=safe_props)
+                    except Exception as node_err:
+                        err_str = str(node_err)
+                        if "too large to index" in err_str or "property size" in err_str.lower():
+                            warning_logger(
+                                f"Skipping {label} '{item['name']}' in {file_path_str}: "
+                                f"property value too large for index (name length={len(item['name'])})"
+                            )
+                        else:
+                            raise  # Re-raise unexpected errors
                     
                     if label == 'Function':
                         for arg_name in item.get('args', []):

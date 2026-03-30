@@ -109,14 +109,17 @@ class KuzuDBManager:
             ("Parameter", "uid STRING, name STRING, path STRING, function_line_number INT64, PRIMARY KEY (uid)")
         ]
         
+        # rel_tables: list of (table_name, schema, use_group)
+        # use_group=True  -> CREATE REL TABLE GROUP (for multi FROM..TO bindings)
+        # use_group=False -> CREATE REL TABLE          (single binding)
         rel_tables = [
-            ("CONTAINS", "FROM File TO Function, FROM File TO Class, FROM File TO Variable, FROM File TO Trait, FROM File TO Interface, FROM `Macro` TO `Macro`, FROM File TO `Macro`, FROM File TO Struct, FROM File TO Enum, FROM File TO `Union`, FROM File TO Annotation, FROM File TO Record, FROM File TO Property, FROM Repository TO Directory, FROM Directory TO Directory, FROM Directory TO File, FROM Repository TO File, FROM Class TO Function, FROM Function TO Function"),
-            ("CALLS", "FROM Function TO Function, FROM Function TO Class, FROM File TO Function, FROM File TO Class, FROM Class TO Function, FROM Class TO Class, line_number INT64, args STRING[], full_call_name STRING"),
-            ("IMPORTS", "FROM File TO Module, alias STRING, full_import_name STRING, imported_name STRING, line_number INT64"),
-            ("INHERITS", "FROM Class TO Class, FROM Record TO Record, FROM Interface TO Interface"),
-            ("HAS_PARAMETER", "FROM Function TO Parameter"),
-            ("INCLUDES", "FROM Class TO Module"),
-            ("IMPLEMENTS", "FROM Class TO Interface, FROM Struct TO Interface, FROM Record TO Interface")
+            ("CONTAINS", "FROM File TO Function, FROM File TO Class, FROM File TO Variable, FROM File TO Trait, FROM File TO Interface, FROM Macro TO Macro, FROM File TO Macro, FROM File TO Struct, FROM File TO Enum, FROM File TO Union, FROM File TO Annotation, FROM File TO Record, FROM File TO Property, FROM Repository TO Directory, FROM Directory TO Directory, FROM Directory TO File, FROM Repository TO File, FROM Class TO Function, FROM Function TO Function", True),
+            ("CALLS", "FROM Function TO Function, FROM Function TO Class, FROM File TO Function, FROM File TO Class, FROM Class TO Function, FROM Class TO Class, line_number INT64, args STRING[], full_call_name STRING", True),
+            ("IMPORTS", "FROM File TO Module, alias STRING, full_import_name STRING, imported_name STRING, line_number INT64", False),
+            ("INHERITS", "FROM Class TO Class, FROM Record TO Record, FROM Interface TO Interface", True),
+            ("HAS_PARAMETER", "FROM Function TO Parameter", False),
+            ("INCLUDES", "FROM Class TO Module", False),
+            ("IMPLEMENTS", "FROM Class TO Interface, FROM Struct TO Interface, FROM Record TO Interface", True)
         ]
 
         for table_name, schema in node_tables:
@@ -127,10 +130,13 @@ class KuzuDBManager:
                     warning_logger(f"Kuzu Schema Node Error ({table_name}): {e}")
                     debug_log(f"Kuzu Schema Node Error ({table_name}): {e}")
 
-        for table_name, schema in rel_tables:
+        for table_name, schema, use_group in rel_tables:
             try:
-                # Need to handle backticks in schema as well for keywords
-                self._conn.execute(f"CREATE REL TABLE `{table_name}`({schema})")
+                if use_group:
+                    # KùzuDB requires CREATE REL TABLE GROUP for multi-binding relationships
+                    self._conn.execute(f"CREATE REL TABLE GROUP `{table_name}`({schema})")
+                else:
+                    self._conn.execute(f"CREATE REL TABLE `{table_name}`({schema})")
             except Exception as e:
                 if "already exists" not in str(e).lower():
                     warning_logger(f"Kuzu Schema Rel Error ({table_name}): {e}")
