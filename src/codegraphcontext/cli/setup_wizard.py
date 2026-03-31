@@ -1032,6 +1032,7 @@ def run_spanner_setup_wizard():
             mgr.get_driver() # Check connection
             
             console.print("[green]✅ Connection successful![/green]")
+            mgr.provision_schema(console)
             _save_spanner_credentials(creds)
             break
         except Exception as e:

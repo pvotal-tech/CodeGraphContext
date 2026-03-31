@@ -7,6 +7,69 @@ from typing import Optional, Tuple, Dict, Any, List
 
 from codegraphcontext.utils.debug_log import debug_log, info_logger, error_logger, warning_logger
 
+NODE_TABLES = {
+    "Repository": {"schema": "path STRING(MAX) NOT NULL, name STRING(MAX), is_dependency BOOL", "pk": "path"},
+    "File": {"schema": "path STRING(MAX) NOT NULL, name STRING(MAX), relative_path STRING(MAX), is_dependency BOOL", "pk": "path"},
+    "Directory": {"schema": "path STRING(MAX) NOT NULL, name STRING(MAX)", "pk": "path"},
+    "Module": {"schema": "name STRING(MAX) NOT NULL, lang STRING(MAX), full_import_name STRING(MAX)", "pk": "name"},
+    "Function": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), cyclomatic_complexity INT64, context STRING(MAX), context_type STRING(MAX), class_context STRING(MAX), is_dependency BOOL, decorators ARRAY<STRING(MAX)>, args ARRAY<STRING(MAX)>", "pk": "uid"},
+    "Class": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL, decorators ARRAY<STRING(MAX)>", "pk": "uid"},
+    "Variable": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), value STRING(MAX), context STRING(MAX), is_dependency BOOL", "pk": "uid"},
+    "Trait": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL", "pk": "uid"},
+    "Interface": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL", "pk": "uid"},
+    "Macro": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL", "pk": "uid"},
+    "Struct": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL", "pk": "uid"},
+    "Enum": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL", "pk": "uid"},
+    "Union": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL", "pk": "uid"},
+    "Annotation": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL", "pk": "uid"},
+    "Record": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL", "pk": "uid"},
+    "Property": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL", "pk": "uid"},
+    "Parameter": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), function_line_number INT64", "pk": "uid"},
+}
+
+EDGE_TABLES = {
+    "CONTAINS": {
+        "pairs": [
+            ("File", "Function"), ("File", "Class"), ("File", "Variable"), 
+            ("File", "Trait"), ("File", "Interface"), ("Macro", "Macro"), 
+            ("File", "Macro"), ("File", "Struct"), ("File", "Enum"), 
+            ("File", "Union"), ("File", "Annotation"), ("File", "Record"), 
+            ("File", "Property"), ("Repository", "Directory"), 
+            ("Directory", "Directory"), ("Directory", "File"), 
+            ("Repository", "File"), ("Class", "Function"), ("Function", "Function")
+        ],
+        "properties": ""
+    },
+    "CALLS": {
+        "pairs": [
+            ("Function", "Function"), ("Function", "Class"), 
+            ("File", "Function"), ("File", "Class"), 
+            ("Class", "Function"), ("Class", "Class")
+        ],
+        "properties": ", line_number INT64, args ARRAY<STRING(MAX)>, full_call_name STRING(MAX)"
+    },
+    "IMPORTS": {
+        "pairs": [("File", "Module")],
+        "properties": ", alias STRING(MAX), full_import_name STRING(MAX), imported_name STRING(MAX), line_number INT64"
+    },
+    "INHERITS": {
+        "pairs": [("Class", "Class"), ("Record", "Record"), ("Interface", "Interface")],
+        "properties": ""
+    },
+    "HAS_PARAMETER": {
+        "pairs": [("Function", "Parameter")],
+        "properties": ""
+    },
+    "INCLUDES": {
+        "pairs": [("Class", "Module")],
+        "properties": ""
+    },
+    "IMPLEMENTS": {
+        "pairs": [("Class", "Interface"), ("Struct", "Interface"), ("Record", "Interface")],
+        "properties": ""
+    }
+}
+
 class SpannerDBManager:
     """Manages the Google Cloud Spanner database connection as a singleton."""
     _instance = None
@@ -49,8 +112,7 @@ class SpannerDBManager:
                         instance = self._client.instance(self._instance_id)
                         self._database_obj = instance.database(self._database_id)
                         
-                        self._initialize_schema()
-                        info_logger("Spanner connection established and schema verified")
+                        info_logger("Spanner connection established")
                     except ImportError:
                         error_logger("Google Cloud Spanner is not installed. Run 'pip install google-cloud-spanner'")
                         raise ValueError("google-cloud-spanner missing.")
@@ -60,27 +122,93 @@ class SpannerDBManager:
 
         return SpannerDriverWrapper(self._database_obj, self._graph_name)
 
-    def _initialize_schema(self):
+    def provision_schema(self, console=None):
         """Creates Node tables, Edge tables, and the Property Graph via DDL if they don't exist."""
-        # Generic CodeGraphContext schema extraction
-        node_tables = [
-            ("Repository", "path STRING(MAX), name STRING(MAX), is_dependency BOOL"),
-            ("File", "path STRING(MAX), name STRING(MAX), relative_path STRING(MAX), is_dependency BOOL"),
-            ("Directory", "path STRING(MAX), name STRING(MAX)"),
-            ("Function", "uid STRING(MAX), name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), cyclomatic_complexity INT64, context STRING(MAX), context_type STRING(MAX), class_context STRING(MAX), is_dependency BOOL, decorators ARRAY<STRING(MAX)>, args ARRAY<STRING(MAX)>"),
-            ("Class", "uid STRING(MAX), name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), context STRING(MAX), context_type STRING(MAX), is_dependency BOOL, decorators ARRAY<STRING(MAX)>"),
-            ("Interface", "uid STRING(MAX), name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL, decorators ARRAY<STRING(MAX)>"),
-            ("Variable", "uid STRING(MAX), name STRING(MAX), path STRING(MAX), line_number INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), value STRING(MAX), context STRING(MAX), is_dependency BOOL, type STRING(MAX), class_context STRING(MAX), decorators ARRAY<STRING(MAX)>"),
-        ]
+        if not self._database_obj:
+            self.get_driver()
+
+        def log(msg):
+            if console: console.print(msg)
+            else: info_logger(msg)
+
+        log(f"[cyan]Provisioning Spanner Property Graph DDL for: [bold]{self._graph_name}[/bold][/cyan]")
+        ddl_statements = []
+
+        # 1. Create Node Tables
+        for table_name, table_info in NODE_TABLES.items():
+            ddl_statements.append(f"""
+            CREATE TABLE IF NOT EXISTS `{table_name}` (
+                {table_info['schema']}
+            ) PRIMARY KEY ({table_info['pk']})
+            """)
+
+        # 2. Create physical Edge Tables
+        for edge_table, table_info in EDGE_TABLES.items():
+            # A universal physical table per edge type
+            ddl_statements.append(f"""
+            CREATE TABLE IF NOT EXISTS `{edge_table}` (
+                id STRING(36) NOT NULL,
+                src_id STRING(MAX) NOT NULL,
+                dst_id STRING(MAX) NOT NULL{table_info['properties']}
+            ) PRIMARY KEY (id)
+            """)
+
+        # 3. Create Property Graph
+        # Spanner limits CREATE PROPERTY GRAPH to full replacement or initial creation, no IF NOT EXISTS.
+        # Check if it exists via information schema first.
         
-        rel_tables = [
-            ("CONTAINS", "FROM File TO Function, FROM File TO Class, FROM Class TO Function"),
-            ("CALLS", "FROM Function TO Function, FROM Function TO Class"),
-            ("IMPORTS", "FROM File TO Module")
-        ]
+        # Build node tables clause
+        node_tables_clause = ",\n".join([f"    `{node}`" for node in NODE_TABLES.keys()])
         
-        info_logger("Spanner Graph backend depends on strict schema definitions.")
-        info_logger("To apply this schema dynamically, explicit DDL construction is required.")
+        # Build edge tables clause
+        edge_tables_clauses = []
+        for edge_label, edge_data in EDGE_TABLES.items():
+            for src_node, dst_node in edge_data['pairs']:
+                # The relationship creates a unique edge definition per pair mapped to the SAME physical table
+                src_pk = NODE_TABLES[src_node]['pk']
+                dst_pk = NODE_TABLES[dst_node]['pk']
+                edge_tables_clauses.append(f"""
+    `{edge_label}` AS `{edge_label}_{src_node}_{dst_node}`
+      SOURCE KEY (src_id) REFERENCES `{src_node}` ({src_pk})
+      DESTINATION KEY (dst_id) REFERENCES `{dst_node}` ({dst_pk})
+      LABEL `{edge_label}`""")
+
+        edge_tables_clause = ",\n".join(edge_tables_clauses)
+        
+        graph_ddl = f"""
+        CREATE PROPERTY GRAPH `{self._graph_name}`
+        NODE TABLES (
+{node_tables_clause}
+        )
+        EDGE TABLES ({edge_tables_clause}
+        )
+        """
+
+        log("[yellow]Updating DDL. This may take a few minutes...[/yellow]")
+        try:
+            # We wrap graph creation in a try-except to handle existing graphs, 
+            # as Spanner does not support IF NOT EXISTS for CREATE PROPERTY GRAPH.
+            # We first run the table creations.
+            operation = self._database_obj.update_ddl(ddl_statements)
+            operation.result(timeout=120)  # Wait for table creation DDL
+            log("[green]✅ Underlying Tables provisioned.[/green]")
+        except Exception as e:
+            if "Duplicate name" in str(e) or "already exists" in str(e):
+                log("[dim]Tables already exist.[/dim]")
+            else:
+                raise e
+
+        try:
+            # Then we run the graph creation
+            operation = self._database_obj.update_ddl([graph_ddl])
+            operation.result(timeout=120)
+            log(f"[green]✅ Property Graph {self._graph_name} provisioned.[/green]")
+        except Exception as e:
+            if "Duplicate name" in str(e) or "already exists" in str(e):
+                log(f"[dim]Property Graph {self._graph_name} already exists.[/dim]")
+            else:
+                error_logger(f"Failed to create property graph: {e}")
+                log(f"[red]❌ Property Graph creation failed: {e}[/red]")
 
     def close_driver(self):
         if self._client is not None:
@@ -162,6 +290,128 @@ class SpannerResultWrapper:
     def __iter__(self):
         return iter([SpannerRecord(r) for r in self.result_list])
 
+def _auto_alias_return_clause(query: str) -> Tuple[str, Dict[str, str]]:
+    """
+    Finds the final RETURN clause and ensures every expression has an AS alias (c_0, c_1).
+    Returns (aliased_query, alias_map), where alias_map maps auto-generated
+    aliases back to the original expression string to simulate Neo4j implicit aliasing parity.
+    """
+    last_return_pos = -1
+    i = 0
+    n = len(query)
+    in_single = False
+    in_double = False
+    
+    while i < n:
+        c = query[i]
+        if c == "'":
+            if not in_double: in_single = not in_single
+        elif c == '"':
+            if not in_single: in_double = not in_double
+        elif not in_single and not in_double:
+            if query[i:i+7].upper() == "RETURN " and (i == 0 or query[i-1].isspace()):
+                last_return_pos = i
+        i += 1
+        
+    if last_return_pos == -1:
+        return query, {}
+        
+    prefix = query[:last_return_pos + 7]
+    remainder = query[last_return_pos + 7:]
+    
+    columns = []
+    current_col = []
+    
+    paren_depth = 0
+    bracket_depth = 0
+    brace_depth = 0
+    in_single = False
+    in_double = False
+    
+    i = 0
+    m = len(remainder)
+    
+    def check_keyword(idx, kw):
+        if idx + len(kw) <= m:
+            if remainder[idx:idx+len(kw)].upper() == kw:
+                if idx + len(kw) == m or remainder[idx+len(kw)].isspace():
+                    return True
+        return False
+        
+    end_idx = m
+    while i < m:
+        c = remainder[i]
+        
+        if c == "'":
+            if not in_double: in_single = not in_single
+            current_col.append(c)
+        elif c == '"':
+            if not in_single: in_double = not in_double
+            current_col.append(c)
+        elif not in_single and not in_double:
+            if c == '(': paren_depth += 1
+            elif c == ')': paren_depth -= 1
+            elif c == '[': bracket_depth += 1
+            elif c == ']': bracket_depth -= 1
+            elif c == '{': brace_depth += 1
+            elif c == '}': brace_depth -= 1
+            
+            if paren_depth == 0 and bracket_depth == 0 and brace_depth == 0:
+                if c == ',':
+                    columns.append("".join(current_col))
+                    current_col = []
+                    i += 1
+                    continue
+                if (check_keyword(i, "ORDER BY") or 
+                    check_keyword(i, "LIMIT") or 
+                    check_keyword(i, "SKIP") or
+                    check_keyword(i, "OFFSET")):
+                    end_idx = i
+                    break
+            current_col.append(c)
+        else:
+            current_col.append(c)
+        i += 1
+        
+    if current_col:
+        columns.append("".join(current_col))
+        
+    suffix = remainder[end_idx:]
+    
+    alias_map = {}
+    new_columns = []
+    
+    for idx, col in enumerate(columns):
+        col_str = col.strip()
+        if not col_str:
+            new_columns.append(col)
+            continue
+            
+        import re
+        # Check if user explicitly aliased (AS <alias>)
+        match = re.search(r'(?i)\s+AS\s+([a-zA-Z0-9_`]+)$', col_str)
+        if match:
+            new_columns.append(col)
+        else:
+            c_alias = f"c_{idx}"
+            
+            has_distinct = ""
+            if idx == 0 and col_str.upper().startswith("DISTINCT "):
+                has_distinct = col_str[:9]
+                col_str = col_str[9:].lstrip()
+            
+            alias_map[c_alias] = col_str
+            
+            if has_distinct:
+                new_columns.append(f"{has_distinct}{col_str} AS {c_alias}")
+            else:
+                new_columns.append(f"{col_str} AS {c_alias}")
+                
+    if suffix and not suffix[0].isspace():
+        suffix = " " + suffix
+    final_query = prefix + ", ".join(new_columns) + suffix
+    return final_query, alias_map
+
 
 class SpannerSessionWrapper:
     def __init__(self, database_obj, graph_name):
@@ -175,8 +425,11 @@ class SpannerSessionWrapper:
         return False
 
     def run(self, query, **parameters):
+        # 0. Alias the return clause to ensure GQL compliance
+        aliased_query, col_map = _auto_alias_return_clause(query)
+
         # 1. Translate Query
-        translations, is_sql = self._translate_query(query, parameters)
+        translations, is_sql = self._translate_query(aliased_query, parameters)
         
         try:
             if is_sql:
@@ -188,16 +441,16 @@ class SpannerSessionWrapper:
                         warning_logger(f"Translating unsupported GQL DETACH DELETE into cascading Spanner SQL deletions for path: {path_val}")
                         
                         tables_with_path = [
-                            "Node_Function", "Node_Class", "Node_Variable", "Node_Parameter", 
-                            "Node_Record", "Node_Interface", "Node_Struct", "Node_Enum", "Node_Union", 
-                            "Node_Property", "Node_Annotation", "Node_Trait", "Node_Macro",
-                            "Node_File", "Node_Directory", "Node_Repository",
+                            "Function", "Class", "Variable", "Parameter", 
+                            "Record", "Interface", "Struct", "Enum", "Union", 
+                            "Property", "Annotation", "Trait", "Macro",
+                            "File", "Directory", "Repository",
                         ]
                         
                         for table in tables_with_path:
                             try:
                                 transaction.execute_update(
-                                    f"DELETE FROM {table} WHERE STARTS_WITH(path, @path)",
+                                    f"DELETE FROM `{table}` WHERE STARTS_WITH(path, @path)",
                                     params={"path": path_val}
                                 )
                             except Exception:
@@ -221,13 +474,20 @@ class SpannerSessionWrapper:
                     for row in results:
                         if fields is None:
                             fields = [f.name for f in results.fields]
-                        formatted_results.append(dict(zip(fields, row)))
+                        
+                        mapped_fields = [col_map.get(f, f) for f in fields]
+                        formatted_results.append(dict(zip(mapped_fields, row)))
                     return SpannerResultWrapper(formatted_results)
                     
         except Exception as e:
             err_str = str(e).lower()
             if "already exists" in err_str:
                 return SpannerResultWrapper([])
+            if "google.api_core.exceptions" in str(type(e)):
+                # Abstract away Spanner syntax/validation errors to the original expected exception
+                from neo4j.exceptions import CypherSyntaxError
+                error_logger(f"Spanner GQL rejected syntax/properties: {query[:100]}... Error: {e}")
+                raise CypherSyntaxError(f"Backend rejected Cypher Query: {str(e)}")
             error_logger(f"Spanner Query failed: {query[:100]}... Error: {e}")
             raise
 
@@ -254,16 +514,27 @@ class SpannerSessionWrapper:
                 
                 # Handle PK mapping
                 pk_fields = merge_node_match.group(3).split(',')
+                # Sort the fields by key name so UUID generation is deterministic regardless of query order
+                sorted_match_criteria = []
                 for field in pk_fields:
                     if ':' in field:
                         k, v_raw = field.split(':', 1)
                         k = k.strip()
                         v_raw = v_raw.strip()
                         if v_raw.startswith('$'):
-                            sql_params[k] = parameters.get(v_raw[1:])
+                            val = parameters.get(v_raw[1:])
                         else:
-                            sql_params[k] = v_raw.strip('"\'')
+                            val = v_raw.strip('"\'')
+                        sql_params[k] = val
+                        sorted_match_criteria.append((k, str(val)))
                 
+                sorted_match_criteria.sort()
+                hash_payload = f"{node_label}_" + "_".join([f"{k}={v}" for k, v in sorted_match_criteria])
+                
+                import uuid
+                if 'uid' not in sql_params:
+                    sql_params['uid'] = str(uuid.uuid5(uuid.NAMESPACE_OID, hash_payload))
+
                 # Associated SET statements
                 # e.g., SET var += $props
                 set_plus_match = re.search(r'SET\s+' + node_var + r'\s*\+=\s*\$([a-zA-Z0-9_]+)', query)
@@ -295,7 +566,7 @@ class SpannerSessionWrapper:
                         vals.append(f"@{c}")
                         final_sql_params[c] = v
                         
-                sql_query = f"INSERT OR UPDATE Node_{node_label} ({', '.join(cols)}) VALUES ({', '.join(vals)})"
+                sql_query = f"INSERT OR UPDATE `{node_label}` ({', '.join(cols)}) VALUES ({', '.join(vals)})"
                 sql_ops.append((sql_query, final_sql_params))
 
             # 2. Edge MERGE extraction
@@ -331,9 +602,18 @@ class SpannerSessionWrapper:
                 src_pk = guess_pk_name(src_type)
                 dst_pk = guess_pk_name(dst_type)
 
+                src_val = parameters.get(f"{src_var}_pk", parameters.get(src_pk, f"dummy_{src_var}"))
+                dst_val = parameters.get(f"{dst_var}_pk", parameters.get(dst_pk, f"dummy_{dst_var}"))
+                
+                import uuid
+                # Factor in edge properties (if any) so that duplicate edges with different attributes
+                # (e.g. two CALLS relations on different line numbers) don't wrongly upsert over each other.
+                edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{edge_label}_{src_val}_{dst_val}_{edge_props_raw}"))
+
                 sql_params = {
-                    "src_id": parameters.get(f"{src_var}_pk", parameters.get(src_pk, f"dummy_{src_var}")),
-                    "dst_id": parameters.get(f"{dst_var}_pk", parameters.get(dst_pk, f"dummy_{dst_var}"))
+                    "id": edge_id,
+                    "src_id": src_val,
+                    "dst_id": dst_val
                 }
 
                 if edge_props_raw:
@@ -367,8 +647,8 @@ class SpannerSessionWrapper:
                         vals.append(f"@{c}")
                         final_sql_params[c] = v
 
-                table_name = f"EdgeT_{edge_label}_{src_type}_{dst_type}"
-                sql_query = f"INSERT OR UPDATE {table_name} ({', '.join(cols)}) VALUES ({', '.join(vals)})"
+                table_name = edge_label
+                sql_query = f"INSERT OR UPDATE `{table_name}` ({', '.join(cols)}) VALUES ({', '.join(vals)})"
                 sql_ops.append((sql_query, final_sql_params))
 
             if sql_ops:
