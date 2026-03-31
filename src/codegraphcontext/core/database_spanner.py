@@ -442,6 +442,9 @@ class SpannerSessionWrapper:
         # Translate Cypher functions
         gql_query = re.sub(r'(?i)\btoLower\(', 'LOWER(', gql_query)
         
+        # Spanner GQL does not support DISTINCT on arrays. For compatibility, strip DISTINCT.
+        gql_query = re.sub(r'(?i)\bRETURN\s+DISTINCT\b', 'RETURN', gql_query)
+        
         # Wrap all node and edge labels in backticks to prevent reserved word collisions
         gql_query = re.sub(r'\[([a-zA-Z0-9_]*):([a-zA-Z0-9_]+)', r'[\1:`\2`', gql_query)
         gql_query = re.sub(r'\(([a-zA-Z0-9_]*):([a-zA-Z0-9_]+)', r'(\1:`\2`', gql_query)
