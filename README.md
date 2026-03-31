@@ -96,7 +96,7 @@ A powerful **MCP server** and **CLI toolkit** that indexes local code into a gra
 ---
 
 ## Project Details
-- **Version:** 0.3.2
+- **Version:** 0.3.8
 - **Authors:** Shashank Shekhar Singh <shashankshekharsingh1205@gmail.com>
 - **License:** MIT License (See [LICENSE](LICENSE) for details)
 - **Website:** [CodeGraphContext](http://codegraphcontext.vercel.app/)
@@ -183,7 +183,7 @@ _If you’re using CodeGraphContext in your project, feel free to open a PR and 
 - `stdlibs>=2023.11.18`
 - `typer[all]>=0.9.0`
 - `rich>=13.7.0`
-- `inquirerpy>=0.3.4`
+- `inquirerpy>=0.3.7`
 - `python-dotenv>=1.0.0`
 - `tree-sitter>=0.21.0`
 - `tree-sitter-language-pack>=0.6.0`
@@ -205,7 +205,7 @@ pip install codegraphcontext
 
 ### If 'cgc' command isn't found, run our one-line fix:
 ```
-curl -sSL [https://raw.githubusercontent.com/CodeGraphContext/CodeGraphContext/main/scripts/post_install_fix.sh](https://raw.githubusercontent.com/CodeGraphContext/CodeGraphContext/main/scripts/post_install_fix.sh) | bash
+curl -sSL https://raw.githubusercontent.com/CodeGraphContext/CodeGraphContext/main/scripts/post_install_fix.sh | bash
 ```
 
 ---

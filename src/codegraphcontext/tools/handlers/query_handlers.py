@@ -63,3 +63,25 @@ def execute_cypher_query(db_manager, **args) -> Dict[str, Any]:
             "error": "An unexpected error occurred while executing the query.",
             "details": str(e)
         }
+
+def visualize_graph_query(db_manager, **args) -> Dict[str, Any]:
+    """Tool to generate a visualization URL for the local Playground UI."""
+    cypher_query = args.get("cypher_query")
+    if not cypher_query:
+        return {"error": "Cypher query cannot be empty."}
+
+    try:
+        # We point to the local server started by 'cgc visualize'
+        # By default it runs on port 8000
+        port = 8000
+        encoded_query = urllib.parse.quote(cypher_query)
+        visualization_url = f"http://localhost:{port}/index.html?cypher_query={encoded_query}"
+        
+        return {
+            "success": True,
+            "visualization_url": visualization_url,
+            "message": "Click the URL to visualize this specific query in the Playground UI. (Ensure 'cgc visualize' is running)"
+        }
+    except Exception as e:
+        debug_log(f"Error generating visualization URL: {str(e)}")
+        return {"error": f"Failed to generate visualization URL: {str(e)}"}

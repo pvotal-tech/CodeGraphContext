@@ -108,12 +108,14 @@ def test_tc01_default_ignore_patterns_exists():
     assert len(DEFAULT_IGNORE_PATTERNS) > 0
 
 def test_tc02_validate_pattern_format():
-    """Verify all patterns start with '*.' prefix"""
+    """Verify patterns are either glob extensions (*.foo) or gitignore-style directory names (name/)"""
     for pattern in DEFAULT_IGNORE_PATTERNS:
-        assert pattern.startswith("*."), f"Pattern '{pattern}' does not start with '*'"
+        ok = pattern.startswith("*.") or (pattern.endswith("/") and not pattern.startswith("*"))
+        assert ok, f"Pattern '{pattern}' must be '*.ext' or a directory pattern like 'name/'"
 
 def test_tc03_media_patterns_included():
     """Verify media patterns (*.png, *.jpg, *.mp4) are included in defaults"""
+    assert "node_modules/" in DEFAULT_IGNORE_PATTERNS
     assert "*.png" in DEFAULT_IGNORE_PATTERNS
     assert "*.jpg" in DEFAULT_IGNORE_PATTERNS
     assert "*.mp4" in DEFAULT_IGNORE_PATTERNS
