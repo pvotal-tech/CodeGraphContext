@@ -8,7 +8,7 @@ from typing import Optional, Tuple, Dict, Any, List
 from codegraphcontext.utils.debug_log import debug_log, info_logger, error_logger, warning_logger
 
 NODE_TABLES = {
-    "Repository": {"schema": "path STRING(MAX) NOT NULL, name STRING(MAX), is_dependency BOOL, properties JSON", "pk": "path"},
+    "Repository": {"schema": "path STRING(MAX) NOT NULL, name STRING(MAX), is_dependency BOOL, properties JSON, last_indexed_commit STRING(MAX)", "pk": "path"},
     "File": {"schema": "path STRING(MAX) NOT NULL, name STRING(MAX), relative_path STRING(MAX), is_dependency BOOL, properties JSON", "pk": "path"},
     "Directory": {"schema": "path STRING(MAX) NOT NULL, name STRING(MAX), properties JSON", "pk": "path"},
     "Module": {"schema": "name STRING(MAX) NOT NULL, lang STRING(MAX), full_import_name STRING(MAX), properties JSON", "pk": "name"},
@@ -456,6 +456,89 @@ class SpannerSessionWrapper:
 
         return gql_query, safe_parameters
 
+    def _execute_translations(self, transaction, translations):
+        for sql_op in translations:
+            if isinstance(sql_op, tuple):
+                sql_query, sql_params = sql_op
+                transaction.execute_update(sql_query, params=sql_params)
+            elif isinstance(sql_op, dict) and sql_op.get("type") == "edge_merge":
+                import uuid
+                import json
+                import re
+                prefix = sql_op["match_query_prefix"]
+                src_var, dst_var = sql_op["src_var"], sql_op["dst_var"]
+                src_pk, dst_pk = sql_op["src_pk"], sql_op["dst_pk"]
+                
+                params = sql_op["original_parameters"]
+                
+                # Use bound generated PKs from same-transaction MERGE operations if available
+                src_val = params.get(f"{src_var}_pk", params.get(src_pk))
+                dst_val = params.get(f"{dst_var}_pk", params.get(dst_pk))
+                
+                # Determine mapping values from GQL lookup if not provided directly
+                fields_to_return = []
+                if not src_val:
+                    fields_to_return.append(f"{src_var}.{src_pk} AS src_pk_val")
+                if not dst_val:
+                    fields_to_return.append(f"{dst_var}.{dst_pk} AS dst_pk_val")
+                    
+                rows = []
+                if fields_to_return:
+                    match_lines = [line.strip() for line in prefix.split("\n") if re.match(r'^(MATCH|OPTIONAL MATCH|WITH|WHERE)\b', line.strip(), re.IGNORECASE)]
+                    gql_prefix = "\n".join(match_lines)
+                    if gql_prefix:
+                        gql_query = gql_prefix + "\nRETURN " + ", ".join(fields_to_return)
+                        formatted_gql, formatted_params = self._format_gql(gql_query, params)
+                        results = transaction.execute_sql(formatted_gql, params=formatted_params)
+                        rows = [dict(zip([f.name for f in results.fields], row)) for row in results]
+                        
+                # Fallback if logic is a pure MERGE without MATCH sequence or no rows found
+                if not rows:
+                    rows = [{}]
+
+                for row in rows:
+                    final_src_val = src_val or row.get("src_pk_val") or params.get(src_pk) or f"dummy_{src_var}"
+                    final_dst_val = dst_val or row.get("dst_pk_val") or params.get(dst_pk) or f"dummy_{dst_var}"
+                        
+                    edge_label = sql_op["edge_label"]
+                    edge_props_raw = sql_op["edge_props_raw"]
+                    edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{edge_label}_{final_src_val}_{final_dst_val}_{edge_props_raw}"))
+                    
+                    final_sql_params = sql_op["sql_params"].copy()
+                    final_sql_params["id"] = edge_id
+                    final_sql_params["src_id"] = final_src_val
+                    final_sql_params["dst_id"] = final_dst_val
+                    
+                    cols, vals = [] , []
+                    insert_params = {}
+                    for c, v in final_sql_params.items():
+                        if isinstance(v, dict):
+                            cols.append(c)
+                            vals.append(f"PARSE_JSON(@{c})")
+                            insert_params[c] = json.dumps(v)
+                        else:
+                            cols.append(c)
+                            vals.append(f"@{c}")
+                            insert_params[c] = v
+                    
+                    sql = f"INSERT OR UPDATE `{edge_label}` ({', '.join(cols)}) VALUES ({', '.join(vals)})"
+                    transaction.execute_update(sql, params=insert_params)
+
+    def run_batch(self, batch_queries: list):
+        """Executes a list of (query, parameters) tuples in a single Spanner transaction."""
+        all_translations = []
+        for query, parameters in batch_queries:
+            aliased_query, _ = _auto_alias_return_clause(query)
+            translations, is_sql = self._translate_query(aliased_query, parameters)
+            if not is_sql or translations == "SYSTEM_DELETE_CASCADE":
+                raise ValueError("run_batch is only supported for mutating SQL translation sequences.")
+            all_translations.extend(translations)
+            
+        if all_translations:
+            def execute_all_mutations(transaction):
+                self._execute_translations(transaction, all_translations)
+            self.database.run_in_transaction(execute_all_mutations)
+
     def run(self, query, **parameters):
         # 0. Alias the return clause to ensure GQL compliance
         aliased_query, col_map = _auto_alias_return_clause(query)
@@ -492,72 +575,7 @@ class SpannerSessionWrapper:
                     return SpannerResultWrapper([])
                     
                 def execute_mutation(transaction):
-                    for sql_op in translations:
-                        if isinstance(sql_op, tuple):
-                            sql_query, sql_params = sql_op
-                            transaction.execute_update(sql_query, params=sql_params)
-                        elif isinstance(sql_op, dict) and sql_op.get("type") == "edge_merge":
-                            import uuid
-                            import json
-                            import re
-                            prefix = sql_op["match_query_prefix"]
-                            src_var, dst_var = sql_op["src_var"], sql_op["dst_var"]
-                            src_pk, dst_pk = sql_op["src_pk"], sql_op["dst_pk"]
-                            
-                            params = sql_op["original_parameters"]
-                            
-                            # Use bound generated PKs from same-transaction MERGE operations if available
-                            src_val = params.get(f"{src_var}_pk", params.get(src_pk))
-                            dst_val = params.get(f"{dst_var}_pk", params.get(dst_pk))
-                            
-                            # Determine mapping values from GQL lookup if not provided directly
-                            fields_to_return = []
-                            if not src_val:
-                                fields_to_return.append(f"{src_var}.{src_pk} AS src_pk_val")
-                            if not dst_val:
-                                fields_to_return.append(f"{dst_var}.{dst_pk} AS dst_pk_val")
-                                
-                            rows = []
-                            if fields_to_return:
-                                match_lines = [line.strip() for line in prefix.split("\n") if re.match(r'^(MATCH|OPTIONAL MATCH|WITH|WHERE)\b', line.strip(), re.IGNORECASE)]
-                                gql_prefix = "\n".join(match_lines)
-                                if gql_prefix:
-                                    gql_query = gql_prefix + "\nRETURN " + ", ".join(fields_to_return)
-                                    formatted_gql, formatted_params = self._format_gql(gql_query, params)
-                                    results = transaction.execute_sql(formatted_gql, params=formatted_params)
-                                    rows = [dict(zip([f.name for f in results.fields], row)) for row in results]
-                                    
-                            # Fallback if logic is a pure MERGE without MATCH sequence or no rows found
-                            if not rows:
-                                rows = [{}]
-
-                            for row in rows:
-                                final_src_val = src_val or row.get("src_pk_val") or params.get(src_pk) or f"dummy_{src_var}"
-                                final_dst_val = dst_val or row.get("dst_pk_val") or params.get(dst_pk) or f"dummy_{dst_var}"
-                                    
-                                edge_label = sql_op["edge_label"]
-                                edge_props_raw = sql_op["edge_props_raw"]
-                                edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{edge_label}_{final_src_val}_{final_dst_val}_{edge_props_raw}"))
-                                
-                                final_sql_params = sql_op["sql_params"].copy()
-                                final_sql_params["id"] = edge_id
-                                final_sql_params["src_id"] = final_src_val
-                                final_sql_params["dst_id"] = final_dst_val
-                                
-                                cols, vals = [], []
-                                insert_params = {}
-                                for c, v in final_sql_params.items():
-                                    if isinstance(v, dict):
-                                        cols.append(c)
-                                        vals.append(f"PARSE_JSON(@{c})")
-                                        insert_params[c] = json.dumps(v)
-                                    else:
-                                        cols.append(c)
-                                        vals.append(f"@{c}")
-                                        insert_params[c] = v
-                                
-                                sql = f"INSERT OR UPDATE `{edge_label}` ({', '.join(cols)}) VALUES ({', '.join(vals)})"
-                                transaction.execute_update(sql, params=insert_params)
+                    self._execute_translations(transaction, translations)
 
                 self.database.run_in_transaction(execute_mutation)
                 return SpannerResultWrapper([])

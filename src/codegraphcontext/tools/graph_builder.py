@@ -16,6 +16,17 @@ from ..utils.tree_sitter_manager import get_tree_sitter_manager
 from ..cli.config_manager import get_config_value
 from ..utils.path_ignore import file_path_has_ignore_dir_segment
 import fnmatch
+
+def to_global_uri(local_path: Path, repo_root: Path, virtual_repo_name: str) -> str:
+    """Converts a local absolute path into a globally unique URI matching repo@branch$path."""
+    try:
+        rel = local_path.resolve().relative_to(repo_root.resolve())
+        if str(rel) == '.':
+            return virtual_repo_name
+        return f"{virtual_repo_name}${str(rel)}"
+    except ValueError:
+        return str(local_path.resolve())
+
  
 DEFAULT_IGNORE_PATTERNS = [
     # Vendor / env dirs (gitignore-style; complements IGNORE_DIRS during indexing)
@@ -372,17 +383,15 @@ class GraphBuilder:
         return imports_map
 
     # Language-agnostic method
-    def add_repository_to_graph(self, repo_path: Path, is_dependency: bool = False):
-        """Adds a repository node using its absolute path as the unique key."""
-        repo_name = repo_path.name
-        repo_path_str = str(repo_path.resolve())
+    def add_repository_to_graph(self, repo_uri: str, repo_name: str, is_dependency: bool = False):
+        """Adds a repository node using its virtual URI as the unique key."""
         with self.driver.session() as session:
             session.run(
                 """
                 MERGE (r:Repository {path: $path})
                 SET r.name = $name, r.is_dependency = $is_dependency
                 """,
-                path=repo_path_str,
+                path=repo_uri,
                 name=repo_name,
                 is_dependency=is_dependency,
             )
@@ -392,41 +401,45 @@ class GraphBuilder:
         calls_count = len(file_data.get('function_calls', []))
         debug_log(f"Executing add_file_to_graph for {file_data.get('path', 'unknown')} - Calls found: {calls_count}")
         """Adds a file and its contents within a single, unified session."""
-        file_path_str = str(Path(file_data['path']).resolve())
-        file_name = Path(file_path_str).name
+        file_uri = file_data['path']
+        repo_uri = file_data['repo_path']
+        file_path_str = file_uri
+        
+        if file_uri.startswith(repo_uri + "$"):
+            relative_path = file_uri[len(repo_uri)+1:]
+        else: # Safety fallback
+            relative_path = Path(file_uri).name
+            
+        file_name = Path(relative_path).name
         is_dependency = file_data.get('is_dependency', False)
 
         with self.driver.session() as session:
-            try:
-                # Match repository by path, not name, to avoid conflicts with same-named folders at different locations
-                repo_result = session.run("MATCH (r:Repository {path: $repo_path}) RETURN r.path as path", repo_path=str(Path(file_data['repo_path']).resolve())).single()
-                relative_path = str(Path(file_path_str).relative_to(Path(repo_result['path']))) if repo_result else file_name
-            except ValueError:
-                relative_path = file_name
+            batch_support = hasattr(session, 'run_batch')
+            batch_queries = []
 
-            session.run("""
+            def execute_or_queue(query, **kwargs):
+                if batch_support:
+                    batch_queries.append((query, kwargs))
+                else:
+                    session.run(query, **kwargs)
+
+            execute_or_queue("""
                 MERGE (f:File {path: $path})
                 SET f.name = $name, f.relative_path = $relative_path, f.is_dependency = $is_dependency
-            """, path=file_path_str, name=file_name, relative_path=relative_path, is_dependency=is_dependency)
+            """, path=file_uri, name=file_name, relative_path=relative_path, is_dependency=is_dependency)
 
-            file_path_obj = Path(file_path_str)
-            if repo_result:
-                repo_path_obj = Path(repo_result['path'])
-            else:
-                # Fallback to the path we queried for
-                warning_logger(f"Repository node not found for {file_data['repo_path']} during indexing of {file_name}. Using original path.")
-                repo_path_obj = Path(file_data['repo_path']).resolve()
-            
-            relative_path_to_file = file_path_obj.relative_to(repo_path_obj)
-            
-            parent_path = str(repo_path_obj)
+            parent_path = repo_uri
             parent_label = 'Repository'
+            
+            parts = Path(relative_path).parts[:-1]
 
-            for part in relative_path_to_file.parts[:-1]:
-                current_path = Path(parent_path) / part
-                current_path_str = str(current_path)
+            for part in parts:
+                if parent_label == 'Repository':
+                    current_path_str = f"{parent_path}${part}"
+                else:
+                    current_path_str = f"{parent_path}/{part}"
                 
-                session.run(f"""
+                execute_or_queue(f"""
                     MATCH (p:{parent_label} {{path: $parent_path}})
                     MERGE (d:Directory {{path: $current_path}})
                     SET d.name = $part
@@ -436,11 +449,11 @@ class GraphBuilder:
                 parent_path = current_path_str
                 parent_label = 'Directory'
 
-            session.run(f"""
+            execute_or_queue(f"""
                 MATCH (p:{parent_label} {{path: $parent_path}})
                 MATCH (f:File {{path: $path}})
                 MERGE (p)-[:CONTAINS]->(f)
-            """, parent_path=parent_path, path=file_path_str)
+            """, parent_path=parent_path, path=file_uri)
 
             # CONTAINS relationships for functions, classes, and variables
             # To add a new language-specific node type (e.g., 'Trait' for Rust):
@@ -481,7 +494,7 @@ class GraphBuilder:
                     # 8 kB RANGE-index limit (seen with long C++ template names).
                     safe_props = self._sanitize_props(item)
                     try:
-                        session.run(query, path=file_path_str, name=item['name'], line_number=item['line_number'], props=safe_props)
+                        execute_or_queue(query, path=file_path_str, name=item['name'], line_number=item['line_number'], props=safe_props)
                     except Exception as node_err:
                         err_str = str(node_err)
                         if "too large to index" in err_str or "property size" in err_str.lower():
@@ -494,7 +507,7 @@ class GraphBuilder:
                     
                     if label == 'Function':
                         for arg_name in item.get('args', []):
-                            session.run("""
+                            execute_or_queue("""
                                 MATCH (fn:Function {name: $func_name, path: $path, line_number: $line_number})
                                 MERGE (p:Parameter {name: $arg_name, path: $path, function_line_number: $line_number})
                                 MERGE (fn)-[:HAS_PARAMETER]->(p)
@@ -502,7 +515,7 @@ class GraphBuilder:
 
             # --- NEW: persist Ruby Modules ---
             for m in file_data.get('modules', []):
-                session.run("""
+                execute_or_queue("""
                     MERGE (mod:Module {name: $name})
                     ON CREATE SET mod.lang = $lang
                     ON MATCH  SET mod.lang = coalesce(mod.lang, $lang)
@@ -511,7 +524,7 @@ class GraphBuilder:
             # Create CONTAINS relationships for nested functions
             for item in file_data.get('functions', []):
                 if item.get("context_type") == "function_definition":
-                    session.run("""
+                    execute_or_queue("""
                         MATCH (outer:Function {name: $context, path: $path})
                         MATCH (inner:Function {name: $name, path: $path, line_number: $line_number})
                         MERGE (outer)-[:CONTAINS]->(inner)
@@ -533,7 +546,7 @@ class GraphBuilder:
                     if imp.get('line_number'):
                         rel_props['line_number'] = imp.get('line_number')
 
-                    session.run("""
+                    execute_or_queue("""
                         MATCH (f:File {path: $path})
                         MERGE (m:Module {name: $module_name})
                         MERGE (f)-[r:IMPORTS]->(m)
@@ -567,7 +580,7 @@ class GraphBuilder:
                     sanitized = self._sanitize_props(params)
                     sanitized['rel_props'] = rel_props
 
-                    session.run(f"""
+                    execute_or_queue(f"""
                         MATCH (f:File {{path: $path}})
                         MERGE (m:Module {{name: $module_name}})
                         {set_clause_str}
@@ -575,6 +588,10 @@ class GraphBuilder:
                         SET r += $rel_props
                     """, **sanitized)
 
+            # Flush non-conditional queries before conditional logic
+            if batch_support and batch_queries:
+                session.run_batch(batch_queries)
+                batch_queries.clear()
 
             # Handle CONTAINS relationship between class to their children like variables
             for func in file_data.get('functions', []):
@@ -608,7 +625,7 @@ class GraphBuilder:
 
             # --- NEW: Class INCLUDES Module (Ruby mixins) ---
             for inc in file_data.get('module_inclusions', []):
-                session.run("""
+                execute_or_queue("""
                     MATCH (c:Class {name: $class_name, path: $path})
                     MERGE (m:Module {name: $module_name})
                     MERGE (c)-[:INCLUDES]->(m)
@@ -616,6 +633,10 @@ class GraphBuilder:
                 class_name=inc["class"],
                 path=file_path_str,
                 module_name=inc["module"])
+
+            if batch_support and batch_queries:
+                session.run_batch(batch_queries)
+                batch_queries.clear()
 
             # Class inheritance is handled in a separate pass after all files are processed.
             # Function calls are also handled in a separate pass after all files are processed.
@@ -633,7 +654,7 @@ class GraphBuilder:
 
     def _create_function_calls(self, session, file_data: Dict, imports_map: dict):
         """Create CALLS relationships with a unified, prioritized logic flow for all call types."""
-        caller_file_path = str(Path(file_data['path']).resolve())
+        caller_file_path = file_data['path']
         num_calls = len(file_data.get('function_calls', []))
         if num_calls > 0:
             debug_log(f"Creating function calls for {caller_file_path} (Count: {num_calls})")
@@ -905,7 +926,7 @@ class GraphBuilder:
 
     def _create_inheritance_links(self, session, file_data: Dict, imports_map: dict):
         """Create INHERITS relationships with a more robust resolution logic."""
-        caller_file_path = str(Path(file_data['path']).resolve())
+        caller_file_path = file_data['path']
         local_class_names = {c['name'] for c in file_data.get('classes', [])}
         # Create a map of local import aliases/names to full import names
         local_imports = {imp.get('alias') or imp['name'].split('.')[-1]: imp['name']
@@ -973,7 +994,7 @@ class GraphBuilder:
         if file_data.get('lang') != 'c_sharp':
             return
             
-        caller_file_path = str(Path(file_data['path']).resolve())
+        caller_file_path = file_data['path']
         
         # Collect all local type names
         local_type_names = set()
@@ -1044,9 +1065,9 @@ class GraphBuilder:
                 else:
                     self._create_inheritance_links(session, file_data, imports_map)
                 
-    def delete_file_from_graph(self, path: str):
+    def delete_file_from_graph(self, file_uri: str):
         """Deletes a file and all its contained elements and relationships."""
-        file_path_str = str(Path(path).resolve())
+        file_path_str = file_uri
         with self.driver.session() as session:
             parents_res = session.run("""
                 MATCH (f:File {path: $path})<-[:CONTAINS*]-(d:Directory)
@@ -1071,9 +1092,16 @@ class GraphBuilder:
                     DETACH DELETE d
                 """, path=path)
 
-    def delete_repository_from_graph(self, repo_path: str) -> bool:
+    def delete_repository_from_graph(self, repo_locator: str) -> bool:
         """Deletes a repository and all its contents from the graph. Returns True if deleted, False if not found."""
-        repo_path_str = str(Path(repo_path).resolve())
+        repo_path_str = repo_locator
+        try:
+            p = Path(repo_locator)
+            if p.exists() and p.is_dir():
+                repo_path_str = self._get_virtual_repo_name(p.resolve())
+        except Exception:
+            pass
+            
         with self.driver.session() as session:
             # Check if it exists
             result = session.run("MATCH (r:Repository {path: $path}) RETURN count(r) as cnt", path=repo_path_str).single()
@@ -1087,24 +1115,65 @@ class GraphBuilder:
             info_logger(f"Deleted repository and its contents from graph: {repo_path_str}")
             return True
 
+    def _get_virtual_repo_name(self, path: Path) -> str:
+        virtual_repo_name = f"local://{path.name}"
+        branch = "detached"
+        try:
+            import git
+            repo = git.Repo(path, search_parent_directories=True)
+            if not repo.bare:
+                try:
+                    origin_url = next(iter(repo.remotes.origin.urls))
+                    if origin_url.startswith("git@"):
+                        origin_url = origin_url.replace(":", "/").replace("git@", "")
+                    if origin_url.endswith(".git"):
+                        origin_url = origin_url[:-4]
+                    if origin_url.startswith("https://"):
+                        origin_url = origin_url[8:]
+                except Exception:
+                    origin_url = f"local://{path.name}"
+                try:
+                    branch = repo.active_branch.name
+                except TypeError:
+                    branch = "detached"
+                
+                if not origin_url.startswith("local://"):
+                    virtual_repo_name = f"{origin_url}@{branch}"
+        except Exception:
+            pass
+        return virtual_repo_name
+
     def update_file_in_graph(self, path: Path, repo_path: Path, imports_map: dict):
         """Updates a single file's nodes in the graph."""
-        file_path_str = str(path.resolve())
-        repo_name = repo_path.name
+        virtual_repo_name = self._get_virtual_repo_name(repo_path)
+        file_uri = to_global_uri(path, repo_path, virtual_repo_name)
         
-        self.delete_file_from_graph(file_path_str)
+        self.delete_file_from_graph(file_uri)
 
         if path.exists():
             file_data = self.parse_file(repo_path, path)
             
+            def rewrite_paths(data, root, v_repo_name):
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        if k in ('path', 'repo_path', 'target_file', 'caller_file', 'callee_file', 'called_file', 'resolved_parent_file_path') and isinstance(v, str):
+                            data[k] = to_global_uri(Path(v), root, v_repo_name)
+                        else:
+                            rewrite_paths(v, root, v_repo_name)
+                elif isinstance(data, list):
+                    for item in data:
+                        rewrite_paths(item, root, v_repo_name)
+                        
+            rewrite_paths(file_data, repo_path, virtual_repo_name)
+
             if "error" not in file_data:
-                self.add_file_to_graph(file_data, repo_name, imports_map)
+                self.add_file_to_graph(file_data, virtual_repo_name, imports_map)
                 return file_data
             else:
-                error_logger(f"Skipping graph add for {file_path_str} due to parsing error: {file_data['error']}")
+                error_logger(f"Skipping graph add for {file_uri} due to parsing error: {file_data['error']}")
                 return None
         else:
-            return {"deleted": True, "path": file_path_str}
+            return {"deleted": True, "path": file_uri}
 
     def parse_file(self, repo_path: Path, path: Path, is_dependency: bool = False) -> Dict:
         """Parses a file with the appropriate language parser and extracts code elements."""
@@ -1372,101 +1441,264 @@ class GraphBuilder:
             if job_id:
                 self.job_manager.update_job(job_id, status=JobStatus.RUNNING)
             
-            self.add_repository_to_graph(path, is_dependency)
-            repo_name = path.name
+            # --- COMPUTE VIRTUAL REPO NAME VIA GIT ---
+            virtual_repo_name = f"local://{path.name}"
+            branch = "detached"
+            try:
+                import git
+                repo = git.Repo(path, search_parent_directories=True)
+                if not repo.bare:
+                    if repo.is_dirty(untracked_files=True):
+                        error_msg = f"Repository at {repo.working_dir} has uncommitted changes (not porcelain). Indexation declined."
+                        print(f"[CGC] {error_msg}", flush=True)
+                        if job_id:
+                            self.job_manager.update_job(
+                                job_id, status=JobStatus.FAILED, end_time=datetime.now(), errors=[error_msg]
+                            )
+                        return
+                    try:
+                        origin_url = next(iter(repo.remotes.origin.urls))
+                        if origin_url.startswith("git@"):
+                            origin_url = origin_url.replace(":", "/").replace("git@", "")
+                        if origin_url.endswith(".git"):
+                            origin_url = origin_url[:-4]
+                        if origin_url.startswith("https://"):
+                            origin_url = origin_url[8:]
+                    except Exception:
+                        origin_url = f"local://{path.name}"
+                    try:
+                        branch = repo.active_branch.name
+                    except TypeError:
+                        branch = "detached"
+                    
+                    if not origin_url.startswith("local://"):
+                        virtual_repo_name = f"{origin_url}@{branch}"
+            except Exception:
+                pass
+            
+            print(f"[CGC] Computed virtual repo name -> {virtual_repo_name}", flush=True)
+            repo_name = virtual_repo_name
 
-            # Search for .cgcignore upwards
-            cgcignore_path = None
-            # ignore_root is always the indexed path itself so that file paths
-            # are matched relative to the project being indexed.  A parent
-            # .cgcignore is still loaded (for monorepo support), but anchoring
-            # to its directory would make patterns like "website/" incorrectly
-            # filter out every file when indexing the website sub-directory.
-            ignore_root = path.resolve() if path.is_dir() else path.resolve().parent
+            self.add_repository_to_graph(repo_name, repo_name, is_dependency)
 
-            # Start search from path (or parent if path is file)
-            curr = ignore_root
+            is_valid_git_repo = False
+            files = []
+            try:
+                import git
+                git_repo = git.Repo(path, search_parent_directories=True)
+                if not git_repo.bare and path.is_dir():
+                    is_valid_git_repo = True
+            except Exception:
+                pass
 
-            # Walk up looking for .cgcignore
-            while True:
-                candidate = curr / ".cgcignore"
-                if candidate.exists():
-                    cgcignore_path = candidate
-                    debug_log(f"Found .cgcignore at {curr} (filtering relative to {ignore_root})")
-                    break
-                if curr.parent == curr: # Root hit
-                    break
-                curr = curr.parent
-
-            spec = None
-            if cgcignore_path:
-                with open(cgcignore_path) as f:
-                    user_patterns = [line.strip() for line in f.read().splitlines() if line.strip() and not line.strip().startswith('#')]
-                ignore_patterns = DEFAULT_IGNORE_PATTERNS + user_patterns
-                spec = pathspec.PathSpec.from_lines('gitwildmatch', ignore_patterns)
-            else:
-                # No .cgcignore found — create one in the project root with default patterns
-                # so the user can see and customize what's being ignored
-                project_root = path.resolve() if path.is_dir() else path.resolve().parent
-                new_cgcignore = project_root / ".cgcignore"
+            if is_valid_git_repo:
                 try:
-                    cgcignore_content = "# Auto-generated by CodeGraphContext\n"
-                    cgcignore_content += "# Default ignore patterns for binary/media files\n"
-                    cgcignore_content += "# Add your own patterns below\n\n"
-                    cgcignore_content += "\n".join(DEFAULT_IGNORE_PATTERNS) + "\n"
-                    new_cgcignore.write_text(cgcignore_content)
-                    info_logger(f"Created default .cgcignore at {new_cgcignore}")
-                except OSError as e:
-                    warning_logger(f"Could not create .cgcignore at {new_cgcignore}: {e}")
-                spec = pathspec.PathSpec.from_lines('gitwildmatch', DEFAULT_IGNORE_PATTERNS)
-
-            supported_extensions = self.parsers.keys()
-            all_files = path.rglob("*") if path.is_dir() else [path]
-
-            # Previously only files with supported extensions were indexed.
-            # Updated to include all files so that unsupported file types
-            # can still be represented as minimal File nodes in the graph.
-            files = [f for f in all_files if f.is_file()]
-
-            # Filter default ignored directories
-            ignore_dirs_str = get_config_value("IGNORE_DIRS") or ""
-            if ignore_dirs_str and path.is_dir():
-                ignore_dirs = {d.strip().lower() for d in ignore_dirs_str.split(',') if d.strip()}
-                if ignore_dirs:
-                    kept_files = []
+                    # git ls-files returns paths relative to the repo root
+                    raw_files = git_repo.git.ls_files(str(path.resolve())).splitlines()
+                    repo_root_path = Path(git_repo.working_dir).resolve()
+                    
+                    for f_str in raw_files:
+                        fp = repo_root_path / f_str
+                        if fp.exists() and fp.is_file():
+                            files.append(fp)
+                    print(f"[CGC] Git fast-path selected: Found {len(files)} tracked files.", flush=True)
+                except Exception as e:
+                    print(f"[CGC] Git ls-files failed: {e}. Falling back to default rglob.", flush=True)
+                    is_valid_git_repo = False
+            
+            if not is_valid_git_repo:
+                # Search for .cgcignore upwards
+                cgcignore_path = None
+                # ignore_root is always the indexed path itself so that file paths
+                # are matched relative to the project being indexed.  A parent
+                # .cgcignore is still loaded (for monorepo support), but anchoring
+                # to its directory would make patterns like "website/" incorrectly
+                # filter out every file when indexing the website sub-directory.
+                ignore_root = path.resolve() if path.is_dir() else path.resolve().parent
+    
+                # Start search from path (or parent if path is file)
+                curr = ignore_root
+    
+                # Walk up looking for .cgcignore
+                while True:
+                    candidate = curr / ".cgcignore"
+                    if candidate.exists():
+                        cgcignore_path = candidate
+                        debug_log(f"Found .cgcignore at {curr} (filtering relative to {ignore_root})")
+                        break
+                    if curr.parent == curr: # Root hit
+                        break
+                    curr = curr.parent
+    
+                spec = None
+                if cgcignore_path:
+                    with open(cgcignore_path) as f:
+                        user_patterns = [line.strip() for line in f.read().splitlines() if line.strip() and not line.strip().startswith('#')]
+                    ignore_patterns = DEFAULT_IGNORE_PATTERNS + user_patterns
+                    spec = pathspec.PathSpec.from_lines('gitwildmatch', ignore_patterns)
+                else:
+                    # No .cgcignore found — create one in the project root with default patterns
+                    # so the user can see and customize what's being ignored
+                    project_root = path.resolve() if path.is_dir() else path.resolve().parent
+                    new_cgcignore = project_root / ".cgcignore"
+                    try:
+                        cgcignore_content = "# Auto-generated by CodeGraphContext\n"
+                        cgcignore_content += "# Default ignore patterns for binary/media files\n"
+                        cgcignore_content += "# Add your own patterns below\n\n"
+                        cgcignore_content += "\n".join(DEFAULT_IGNORE_PATTERNS) + "\n"
+                        new_cgcignore.write_text(cgcignore_content)
+                        info_logger(f"Created default .cgcignore at {new_cgcignore}")
+                    except OSError as e:
+                        warning_logger(f"Could not create .cgcignore at {new_cgcignore}: {e}")
+                    spec = pathspec.PathSpec.from_lines('gitwildmatch', DEFAULT_IGNORE_PATTERNS)
+    
+                supported_extensions = self.parsers.keys()
+                all_files = path.rglob("*") if path.is_dir() else [path]
+    
+                # Previously only files with supported extensions were indexed.
+                # Updated to include all files so that unsupported file types
+                # can still be represented as minimal File nodes in the graph.
+                files = [f for f in all_files if f.is_file()]
+    
+                # Filter default ignored directories
+                ignore_dirs_str = get_config_value("IGNORE_DIRS") or ""
+                if ignore_dirs_str and path.is_dir():
+                    ignore_dirs = {d.strip().lower() for d in ignore_dirs_str.split(',') if d.strip()}
+                    if ignore_dirs:
+                        kept_files = []
+                        for f in files:
+                            try:
+                                # Check if any parent directory in the relative path is in ignore list
+                                parts = set(p.lower() for p in f.relative_to(path).parent.parts)
+                                if not parts.intersection(ignore_dirs):
+                                    kept_files.append(f)
+                                else:
+                                    # debug_log(f"Skipping default ignored file: {f}")
+                                    pass
+                            except ValueError:
+                                 kept_files.append(f)
+                        files = kept_files
+                
+                if spec:
+                    filtered_files = []
                     for f in files:
                         try:
-                            # Check if any parent directory in the relative path is in ignore list
-                            parts = set(p.lower() for p in f.relative_to(path).parent.parts)
-                            if not parts.intersection(ignore_dirs):
-                                kept_files.append(f)
+                            # Match relative to the directory containing .cgcignore
+                            rel_path = f.relative_to(ignore_root)
+                            if not spec.match_file(str(rel_path)):
+                                filtered_files.append(f)
                             else:
-                                # debug_log(f"Skipping default ignored file: {f}")
-                                pass
+                                debug_log(f"Ignored file based on .cgcignore: {rel_path}")
                         except ValueError:
-                             kept_files.append(f)
-                    files = kept_files
-            
-            if spec:
-                filtered_files = []
-                for f in files:
-                    try:
-                        # Match relative to the directory containing .cgcignore
-                        rel_path = f.relative_to(ignore_root)
-                        if not spec.match_file(str(rel_path)):
+                            # Should not happen if ignore_root is a parent, but safety fallback
                             filtered_files.append(f)
-                        else:
-                            debug_log(f"Ignored file based on .cgcignore: {rel_path}")
-                    except ValueError:
-                        # Should not happen if ignore_root is a parent, but safety fallback
-                        filtered_files.append(f)
-                files = filtered_files
+                    files = filtered_files
+            
+            # --- GIT INCREMENTAL INDEXING ---
+            print(f"[{path.name}] Starting Git Incremental Indexing Check...", flush=True)
+            changed_files_for_index = None # if None, index everything in `files`
+            try:
+                import git
+                try:
+                    repo = git.Repo(path, search_parent_directories=True)
+                    print(f"[CGC Git] Found repository at {repo.working_dir}", flush=True)
+                    if not repo.bare:
+                        # virtual_repo_name and branch are already computed at the start of the function
+
+                        current_commit = repo.head.commit.hexsha
+                        with self.driver.session() as session:
+                            try:
+                                result = session.run("MATCH (r:Repository {path: $path}) RETURN r.last_indexed_commit as commit", path=virtual_repo_name).single()
+                                last_indexed_commit = result['commit'] if result else None
+                            except Exception as e:
+                                print(f"[CGC Git] Fallback to full sync. Spanner graph missing 'last_indexed_commit' property. Error: {str(e).splitlines()[0]}", flush=True)
+                                last_indexed_commit = None
+                        
+                        if last_indexed_commit:
+                            if last_indexed_commit != current_commit:
+                                try:
+                                    print(f"[CGC Git] Computing diff from {last_indexed_commit[:8]} to HEAD ({current_commit[:8]})...", flush=True)
+                                    diff_index = repo.commit(last_indexed_commit).diff(repo.commit(current_commit))
+                                    repo_root = Path(repo.working_dir).resolve()
+                                    
+                                    changed_files_for_index = set()
+                                    deleted_files = set()
+                                    for d in diff_index:
+                                        if d.change_type == 'D':
+                                            deleted_files.add(str((repo_root / d.a_path).resolve()))
+                                        elif d.change_type == 'R':
+                                            deleted_files.add(str((repo_root / d.a_path).resolve()))
+                                            changed_files_for_index.add(str((repo_root / d.b_path).resolve()))
+                                        else:
+                                            if d.a_path:
+                                                deleted_files.add(str((repo_root / d.a_path).resolve()))
+                                            changed_files_for_index.add(str((repo_root / d.b_path).resolve()))
+                                    
+                                    print(f"[CGC Git] Incremental Plan:", flush=True)
+                                    print(f"  - Repository: {virtual_repo_name}", flush=True)
+                                    print(f"  - Branch:     {branch}", flush=True)
+                                    print(f"  - Revisions:  {last_indexed_commit[:8]} -> {current_commit[:8]}", flush=True)
+                                    print(f"  - [ADDED/MODIFIED] ({len(changed_files_for_index)} files):", flush=True)
+                                    for f in list(changed_files_for_index)[:10]:
+                                        try: print(f"      + {Path(f).relative_to(repo_root)}", flush=True)
+                                        except ValueError: print(f"      + {f}", flush=True)
+                                    if len(changed_files_for_index) > 10: print(f"      ... ({len(changed_files_for_index) - 10} more)", flush=True)
+                                    
+                                    print(f"  - [DELETED/REPLACED] ({len(deleted_files)} files to prune):", flush=True)
+                                    for f in list(deleted_files)[:10]:
+                                        try: print(f"      - {Path(f).relative_to(repo_root)}", flush=True)
+                                        except ValueError: print(f"      - {f}", flush=True)
+                                    if len(deleted_files) > 10: print(f"      ... ({len(deleted_files) - 10} more)", flush=True)
+                                    
+                                    for df in deleted_files:
+                                        deleted_uri = to_global_uri(Path(df), repo_root, virtual_repo_name)
+                                        self.delete_file_from_graph(deleted_uri)
+                                except Exception as e:
+                                    print(f"[CGC Git] Failed to compute diff from {last_indexed_commit[:8]}: {e} - falling back to full index", flush=True)
+                                    changed_files_for_index = None
+                            else:
+                                print(f"[CGC Git] Repository {virtual_repo_name} already up-to-date at {current_commit[:8]}.", flush=True)
+                                changed_files_for_index = set() # No newly modified files
+                        
+                        # Set current commit
+                        with self.driver.session() as session:
+                            try:
+                                session.run("MERGE (r:Repository {path: $path}) SET r.last_indexed_commit = $commit", path=virtual_repo_name, commit=current_commit)
+                            except Exception as e:
+                                pass # Spanner Schema does not have last_indexed_commit yet
+                except git.exc.InvalidGitRepositoryError as e:
+                    print(f"[CGC Git] Invalid repo error: {e}", flush=True)
+            except ImportError as e:
+                print(f"[CGC Git] GitPython not installed or accessible: {e}", flush=True)
+            except Exception as e:
+                print(f"[CGC Git] Integration error: {e}", flush=True)
+
+            if changed_files_for_index is not None:
+                new_files = []
+                for f in files:
+                    if str(f.resolve()) in changed_files_for_index:
+                        new_files.append(f)
+                files = new_files
+                print(f"[CGC Git] Reduced parsing targets to {len(files)} files.", flush=True)
+            # --- END GIT INCREMENTAL INDEXING ---
+
             if job_id:
                 self.job_manager.update_job(job_id, total_files=len(files))
             
             debug_log("Starting pre-scan to build imports map...")
             imports_map = self._pre_scan_for_imports(files)
             debug_log(f"Pre-scan complete. Found {len(imports_map)} definitions.")
+
+            def rewrite_paths(data, root, v_repo_name):
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        if k in ('path', 'repo_path', 'target_file', 'caller_file', 'callee_file', 'called_file', 'resolved_parent_file_path') and isinstance(v, str):
+                            data[k] = to_global_uri(Path(v), root, v_repo_name)
+                        else:
+                            rewrite_paths(v, root, v_repo_name)
+                elif isinstance(data, list):
+                    for item in data:
+                        rewrite_paths(item, root, v_repo_name)
 
             all_file_data = []
 
@@ -1477,6 +1709,9 @@ class GraphBuilder:
                         self.job_manager.update_job(job_id, current_file=str(file))
                     repo_path = path.resolve() if path.is_dir() else file.parent.resolve()
                     file_data = self.parse_file(repo_path, file, is_dependency)
+                    
+                    rewrite_paths(file_data, repo_path, virtual_repo_name)
+                    
                     # Previously only files with supported extensions were indexed.
                     # Updated to include all files so that unsupported file types
                     # can still be represented as minimal File nodes in the graph.
@@ -1496,7 +1731,7 @@ class GraphBuilder:
                     # can still be represented as minimal File nodes in the graph.
                     else:
                         # create minimal node if parser not available
-                        self.add_minimal_file_node(file, repo_path, is_dependency)
+                        self.add_minimal_file_node(file, repo_path, virtual_repo_name, is_dependency)
                     processed_count += 1
 
                     if job_id:
@@ -1525,13 +1760,18 @@ class GraphBuilder:
     # Create a minimal File node for unsupported file types.
     # These files do not contain parsed entities but should still
     # appear in the repository graph as requested in issue #707.
-    def add_minimal_file_node(self, file_path: Path, repo_path: Path, is_dependency: bool = False):
+    def add_minimal_file_node(self, file_path: Path, repo_path: Path, virtual_repo_name: str, is_dependency: bool = False):
 
-        file_path_str = str(file_path.resolve())
-        file_name = file_path.name
-        repo_name = repo_path.name
-        repo_path_str = str(repo_path.resolve())
-
+        file_uri = to_global_uri(file_path, repo_path, virtual_repo_name)
+        repo_uri = virtual_repo_name
+        
+        if file_uri.startswith(repo_uri + "$"):
+            relative_path = file_uri[len(repo_uri)+1:]
+        else: # Safety fallback
+            relative_path = file_path.name
+            
+        file_name = Path(relative_path).name
+        
         with self.driver.session() as session:
 
             session.run(
@@ -1539,36 +1779,34 @@ class GraphBuilder:
                 MERGE (r:Repository {path: $repo_path})
                 SET r.name = $repo_name
                 """,
-                repo_path=repo_path_str,
-                repo_name=repo_name
+                repo_path=repo_uri,
+                repo_name=virtual_repo_name
             )
 
             session.run(
                 """
                 MERGE (f:File {path: $file_path})
                 SET f.name = $file_name,
+                    f.relative_path = $relative_path,
                     f.is_dependency = $is_dependency
                 """,
-                file_path=file_path_str,
+                file_path=file_uri,
                 file_name=file_name,
+                relative_path=relative_path,
                 is_dependency=is_dependency
             )
 
-            # Establish directory structure
-            file_path_obj = Path(file_path_str)
-            repo_path_obj = Path(repo_path_str)
-            try:
-                relative_path_to_file = file_path_obj.relative_to(repo_path_obj)
-            except ValueError:
-                # Fallback if not relative
-                relative_path_to_file = Path(file_path_obj.name)
-            
-            parent_path = repo_path_str
+            # Establish directory structure uniformly using URIs
+            parent_path = repo_uri
             parent_label = 'Repository'
+            
+            parts = Path(relative_path).parts[:-1]
 
-            for part in relative_path_to_file.parts[:-1]:
-                current_path = Path(parent_path) / part
-                current_path_str = str(current_path)
+            for part in parts:
+                if parent_label == 'Repository':
+                    current_path_str = f"{parent_path}${part}"
+                else:
+                    current_path_str = f"{parent_path}/{part}"
                 
                 session.run(f"""
                     MATCH (p:{parent_label} {{path: $parent_path}})
@@ -1584,4 +1822,4 @@ class GraphBuilder:
                 MATCH (p:{parent_label} {{path: $parent_path}})
                 MATCH (f:File {{path: $file_path}})
                 MERGE (p)-[:CONTAINS]->(f)
-            """, parent_path=parent_path, file_path=file_path_str)
+            """, parent_path=parent_path, file_path=file_uri)

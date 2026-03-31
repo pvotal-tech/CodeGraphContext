@@ -151,7 +151,14 @@ def index_helper(path: str):
         return
 
     indexed_repos = code_finder.list_indexed_repositories()
-    repo_exists = any(Path(repo["path"]).resolve() == path_obj for repo in indexed_repos)
+    target_repo_uri = graph_builder._get_virtual_repo_name(path_obj)
+    
+    # Check if a repository matches the virtual URI, fallback to checking local absolute path (for legacy indices)
+    repo_exists = any(
+        repo["path"] == target_repo_uri or 
+        (Path(repo["path"]).is_absolute() and Path(repo["path"]).resolve() == path_obj)
+        for repo in indexed_repos
+    )
     
     if repo_exists:
         # Check if the repository actually has files (not just an empty node from interrupted indexing)
@@ -441,8 +448,14 @@ def reindex_helper(path: str):
 
     # Check if already indexed
     indexed_repos = code_finder.list_indexed_repositories()
-    repo_exists = any(Path(repo["path"]).resolve() == path_obj for repo in indexed_repos)
+    target_repo_uri = graph_builder._get_virtual_repo_name(path_obj)
     
+    # Check if a repository matches the virtual URI, fallback to checking local absolute path (for legacy indices)
+    repo_exists = any(
+        repo["path"] == target_repo_uri or 
+        (Path(repo["path"]).is_absolute() and Path(repo["path"]).resolve() == path_obj)
+        for repo in indexed_repos
+    )
     if repo_exists:
         console.print(f"[yellow]Deleting existing index for: {path_obj}[/yellow]")
         try:
