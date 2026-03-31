@@ -535,6 +535,7 @@ class SpannerSessionWrapper:
             all_translations.extend(translations)
             
         if all_translations:
+            info_logger(f"[Spanner Batch] Executing combined transaction of {len(all_translations)} DML mutations gathered from {len(batch_queries)} GQL statements.")
             def execute_all_mutations(transaction):
                 self._execute_translations(transaction, all_translations)
             self.database.run_in_transaction(execute_all_mutations)
