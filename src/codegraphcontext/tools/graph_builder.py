@@ -444,7 +444,7 @@ class GraphBuilder:
                     MERGE (d:Directory {{path: $current_path}})
                     SET d.name = $part
                     MERGE (p)-[:CONTAINS]->(d)
-                """, parent_path=parent_path, current_path=current_path_str, part=part)
+                """, parent_path=parent_path, current_path=current_path_str, part=part, p_pk=parent_path, d_pk=current_path_str)
 
                 parent_path = current_path_str
                 parent_label = 'Directory'
@@ -453,7 +453,7 @@ class GraphBuilder:
                 MATCH (p:{parent_label} {{path: $parent_path}})
                 MATCH (f:File {{path: $path}})
                 MERGE (p)-[:CONTAINS]->(f)
-            """, parent_path=parent_path, path=file_uri)
+            """, parent_path=parent_path, path=file_uri, p_pk=parent_path, f_pk=file_uri)
 
             # CONTAINS relationships for functions, classes, and variables
             # To add a new language-specific node type (e.g., 'Trait' for Rust):
@@ -479,9 +479,16 @@ class GraphBuilder:
                     if label == 'Function' and 'cyclomatic_complexity' not in item:
                         item['cyclomatic_complexity'] = 1 # Default value
 
+                    # Pre-compute UUID deterministic UID just like backend
+                    import uuid
+                    uid_str = f"{label}_{file_path_str}_{item['name']}_{item.get('line_number', '')}_{item.get('source', '')}"
+                    item_uid = str(uuid.uuid5(uuid.NAMESPACE_OID, uid_str))
+                    item['uid'] = item_uid # Make it available for AST caching later
+
                     query = f"""
                         MATCH (f:File {{path: $path}})
-                        MERGE (n:{label} {{name: $name, path: $path, line_number: $line_number}})
+                        MERGE (n:{label} {{uid: $uid}})
+                        SET n.name = $name, n.path = $path, n.line_number = $line_number
                         SET n += $props
                         MERGE (f)-[:CONTAINS]->(n)
                     """
@@ -494,7 +501,7 @@ class GraphBuilder:
                     # 8 kB RANGE-index limit (seen with long C++ template names).
                     safe_props = self._sanitize_props(item)
                     try:
-                        execute_or_queue(query, path=file_path_str, name=item['name'], line_number=item['line_number'], props=safe_props)
+                        execute_or_queue(query, path=file_path_str, name=item['name'], line_number=item['line_number'], uid=item_uid, props=safe_props, f_pk=file_path_str, n_pk=item_uid)
                     except Exception as node_err:
                         err_str = str(node_err)
                         if "too large to index" in err_str or "property size" in err_str.lower():
@@ -507,11 +514,14 @@ class GraphBuilder:
                     
                     if label == 'Function':
                         for arg_name in item.get('args', []):
+                            p_uid_str = f"Parameter_{file_path_str}_{arg_name}_{item.get('line_number', '')}_"
+                            p_uid = str(uuid.uuid5(uuid.NAMESPACE_OID, p_uid_str))
                             execute_or_queue("""
-                                MATCH (fn:Function {name: $func_name, path: $path, line_number: $line_number})
-                                MERGE (p:Parameter {name: $arg_name, path: $path, function_line_number: $line_number})
+                                MATCH (fn:Function {uid: $fn_uid})
+                                MERGE (p:Parameter {uid: $p_uid})
+                                SET p.name = $arg_name, p.path = $path, p.function_line_number = $line_number
                                 MERGE (fn)-[:HAS_PARAMETER]->(p)
-                            """, func_name=item['name'], path=file_path_str, line_number=item['line_number'], arg_name=arg_name)
+                            """, fn_uid=item_uid, p_uid=p_uid, arg_name=arg_name, path=file_path_str, line_number=item['line_number'], fn_pk=item_uid, p_pk=p_uid)
 
             # --- NEW: persist Ruby Modules ---
             for m in file_data.get('modules', []):
@@ -524,11 +534,17 @@ class GraphBuilder:
             # Create CONTAINS relationships for nested functions
             for item in file_data.get('functions', []):
                 if item.get("context_type") == "function_definition":
-                    execute_or_queue("""
-                        MATCH (outer:Function {name: $context, path: $path})
-                        MATCH (inner:Function {name: $name, path: $path, line_number: $line_number})
-                        MERGE (outer)-[:CONTAINS]->(inner)
-                    """, context=item["context"], path=file_path_str, name=item["name"], line_number=item["line_number"])
+                    outer_uid = None
+                    for pot in file_data.get('functions', []):
+                        if pot['name'] == item['context']:
+                            outer_uid = pot.get('uid')
+                            break
+                    if outer_uid:
+                        execute_or_queue("""
+                            MATCH (outer:Function {uid: $outer_uid})
+                            MATCH (inner:Function {uid: $inner_uid})
+                            MERGE (outer)-[:CONTAINS]->(inner)
+                        """, outer_uid=outer_uid, inner_uid=item['uid'], outer_pk=outer_uid, inner_pk=item['uid'])
 
             # Handle imports and create IMPORTS relationships
             for imp in file_data.get('imports', []):
@@ -551,7 +567,7 @@ class GraphBuilder:
                         MERGE (m:Module {name: $module_name})
                         MERGE (f)-[r:IMPORTS]->(m)
                         SET r += $props
-                    """, path=file_path_str, module_name=module_name, props=rel_props)
+                    """, path=file_path_str, module_name=module_name, props=rel_props, f_pk=file_path_str, m_pk=module_name)
                 else:
                     # Existing logic for Python (and other languages)
                     # For KùzuDB, Module schema only has: name, lang, full_import_name.
@@ -586,42 +602,43 @@ class GraphBuilder:
                         {set_clause_str}
                         MERGE (f)-[r:IMPORTS]->(m)
                         SET r += $rel_props
-                    """, **sanitized)
-
-            # Flush non-conditional queries before conditional logic
-            if batch_support and batch_queries:
-                session.run_batch(batch_queries)
-                batch_queries.clear()
+                    """, f_pk=file_path_str, m_pk=imp.get('name'), **sanitized)
 
             # Handle CONTAINS relationship between class to their children like variables
+            local_class_names = {c['name'] for c in file_data.get('classes', [])}
             for func in file_data.get('functions', []):
                 if func.get('class_context'):
                     # Try same-file match first (Python, JS, etc.)
-                    if not self._safe_run_create(session, """
-                        MATCH (c:Class {name: $class_name, path: $path})
-                        MATCH (fn:Function {name: $func_name, path: $path, line_number: $func_line})
-                        MERGE (c)-[:CONTAINS]->(fn)
-                        RETURN count(*) as created
-                    """, {
-                        'class_name': func['class_context'],
-                        'path': file_path_str,
-                        'func_name': func['name'],
-                        'func_line': func['line_number']
-                    }):
+                    if func['class_context'] in local_class_names:
+                        c_uid = None
+                        for c in file_data.get('classes', []):
+                            if c['name'] == func['class_context']:
+                                c_uid = c.get('uid')
+                                break
+                        if c_uid:
+                            execute_or_queue("""
+                                MATCH (c:Class {uid: $c_uid})
+                                MATCH (fn:Function {uid: $fn_uid})
+                                MERGE (c)-[:CONTAINS]->(fn)
+                            """,
+                                c_uid=c_uid,
+                                fn_uid=func['uid'],
+                                c_pk=c_uid,
+                                fn_pk=func['uid']
+                            )
+                    else:
                         # Cross-file match for C/C++ where class is in .h and method in .cpp.
                         # Note: matches by class name only (no path constraint), so classes
                         # with identical names in different files could get false links.
-                        self._safe_run_create(session, """
+                        execute_or_queue("""
                             MATCH (c:Class {name: $class_name})
-                            MATCH (fn:Function {name: $func_name, path: $path, line_number: $func_line})
+                            MATCH (fn:Function {uid: $fn_uid})
                             MERGE (c)-[:CONTAINS]->(fn)
-                            RETURN count(*) as created
-                        """, {
-                            'class_name': func['class_context'],
-                            'path': file_path_str,
-                            'func_name': func['name'],
-                            'func_line': func['line_number']
-                        })
+                        """,
+                            class_name=func['class_context'],
+                            fn_uid=func['uid'],
+                            fn_pk=func['uid']
+                        )
 
             # --- NEW: Class INCLUDES Module (Ruby mixins) ---
             for inc in file_data.get('module_inclusions', []):
@@ -642,6 +659,35 @@ class GraphBuilder:
             # Function calls are also handled in a separate pass after all files are processed.
 
     # Second pass to create relationships that depend on all files being present like call functions and class inheritance
+    def _populate_resolution_cache(self, all_file_data: list[Dict]):
+        """Build precise in-memory sets of functions and classes that exist in the current indexing batch.
+        This provides O(1) resolution validation locally without sequential network queries.
+        """
+        import time
+        start_time = time.time()
+        
+        self.exact_functions = {}
+        self.exact_classes = {}
+        self._exact_class_has_init = {}
+        
+        for fd in all_file_data:
+            path = fd.get('path')
+            if not path:
+                continue
+                
+            for fn in fd.get('functions', []):
+                uid = fn.get('uid')
+                self.exact_functions[(fn['name'], path)] = uid
+                # Register constructors
+                if fn.get('class_context') and fn.get('name') in ["__init__", "constructor"]:
+                    self._exact_class_has_init[(fn['class_context'], path)] = uid
+                    
+            for cls in fd.get('classes', []):
+                uid = cls.get('uid')
+                self.exact_classes[(cls['name'], path)] = uid
+
+        debug_log(f"Resolution cache built internally in {time.time()-start_time:.2f}s: {len(self.exact_functions)} Functions/Methods, {len(self.exact_classes)} Classes.")
+
     def _safe_run_create(self, session, query, params) -> bool:
         """Helper to run a creation query safely, catching exceptions and checking result."""
         try:
@@ -652,7 +698,7 @@ class GraphBuilder:
             # Optionally log, but suppress to allow fallback
             return False
 
-    def _create_function_calls(self, session, file_data: Dict, imports_map: dict):
+    def _create_function_calls(self, session, file_data: Dict, imports_map: dict, batch_queries: list):
         """Create CALLS relationships with a unified, prioritized logic flow for all call types."""
         caller_file_path = file_data['path']
         num_calls = len(file_data.get('function_calls', []))
@@ -772,12 +818,14 @@ class GraphBuilder:
             if skip_external and is_unresolved_external:
                 continue
 
-            caller_context = call.get('context')
             if caller_context and len(caller_context) == 3 and caller_context[0] is not None:
                 caller_name, _, caller_line_number = caller_context
                 
-                # KùzuDB workaround: Try Function->Function first, then other combinations
-                # This avoids polymorphic MERGE which KùzuDB doesn't support
+                # Determine caller type organically from AST
+                caller_is_func = (caller_name, caller_file_path) in self.exact_functions
+                caller_is_class = (caller_name, caller_file_path) in self.exact_classes
+                caller_label = "Class" if caller_is_class and not caller_is_func else "Function"
+                
                 call_params = self._sanitize_props({
                     'caller_name': caller_name,
                     'caller_file_path': caller_file_path,
@@ -788,84 +836,53 @@ class GraphBuilder:
                     'args': call.get('args', []),
                     'full_call_name': call.get('full_name', called_name)
                 })
+                
+                # Optimistic PK injection to bypass Spanner execute_sql lookups
+                caller_pk = self.exact_functions.get((caller_name, caller_file_path)) or self.exact_classes.get((caller_name, caller_file_path))
+                if caller_pk:
+                    call_params['caller_pk'] = caller_pk
 
-                # Try Function caller -> Function callee
-                if not self._safe_run_create(session, """
-                    OPTIONAL MATCH (caller:Function {name: $caller_name, path: $caller_file_path})
-                    OPTIONAL MATCH (called:Function {name: $called_name, path: $called_file_path})
-                    WITH caller, called
-                    WHERE caller IS NOT NULL AND called IS NOT NULL
-                    MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                    RETURN count(*) as created
-                """, call_params):
+                if resolved_path:
+                    if (called_name, resolved_path) in self.exact_functions:
+                        call_params['called_pk'] = self.exact_functions[(called_name, resolved_path)]
+                        batch_queries.append((f"""
+                            MATCH (caller:{caller_label} {{name: $caller_name, path: $caller_file_path}})
+                            MATCH (called:Function {{name: $called_name, path: $called_file_path}})
+                            MERGE (caller)-[:CALLS {{line_number: $line_number, args: $args, full_call_name: $full_call_name}}]->(called)
+                        """, call_params))
+                    elif (called_name, resolved_path) in self.exact_classes:
+                        called_class_pk = self.exact_classes[(called_name, resolved_path)]
+                        call_params['called_pk'] = called_class_pk
+                        
+                        if (called_name, resolved_path) in self._exact_class_has_init:
+                            init_pk = self._exact_class_has_init[(called_name, resolved_path)]
+                            call_params['init_pk'] = init_pk
+                            batch_queries.append((f"""
+                                MATCH (caller:{caller_label} {{name: $caller_name, path: $caller_file_path}})
+                                MATCH (called:Class {{name: $called_name, path: $called_file_path}})
+                                MATCH (called)-[:CONTAINS]->(init:Function)
+                                WHERE init.name IN ["__init__", "constructor"]
+                                MERGE (caller)-[:CALLS {{line_number: $line_number, args: $args, full_call_name: $full_call_name}}]->(init)
+                            """, call_params))
+                        else:
+                            batch_queries.append((f"""
+                                MATCH (caller:{caller_label} {{name: $caller_name, path: $caller_file_path}})
+                                MATCH (called:Class {{name: $called_name, path: $called_file_path}})
+                                MERGE (caller)-[:CALLS {{line_number: $line_number, args: $args, full_call_name: $full_call_name}}]->(called)
+                            """, call_params))
+                    else:
+                        batch_queries.append((f"""
+                            MATCH (caller:{caller_label} {{name: $caller_name, path: $caller_file_path}})
+                            MATCH (called:Function {{name: $called_name}})
+                            MERGE (caller)-[:CALLS {{line_number: $line_number, args: $args, full_call_name: $full_call_name}}]->(called)
+                        """, call_params))
+                else:
+                    batch_queries.append((f"""
+                        MATCH (caller:{caller_label} {{name: $caller_name, path: $caller_file_path}})
+                        MATCH (called:Function {{name: $called_name}})
+                        MERGE (caller)-[:CALLS {{line_number: $line_number, args: $args, full_call_name: $full_call_name}}]->(called)
+                    """, call_params))
 
-                    # Try Function caller -> Class.__init__ / constructor
-                    if not self._safe_run_create(session, """
-                        OPTIONAL MATCH (caller:Function {name: $caller_name, path: $caller_file_path})
-                        OPTIONAL MATCH (called:Class {name: $called_name, path: $called_file_path})
-                        OPTIONAL MATCH (called)-[:CONTAINS]->(init:Function)
-                        WHERE init.name IN ["__init__", "constructor"]
-                        WITH caller, init
-                        WHERE caller IS NOT NULL AND init IS NOT NULL
-                        MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(init)
-                        RETURN count(*) as created
-                    """, call_params):
-                        # No __init__ found - link directly to the Class node
-                        self._safe_run_create(session, """
-                            OPTIONAL MATCH (caller:Function {name: $caller_name, path: $caller_file_path})
-                            OPTIONAL MATCH (called:Class {name: $called_name, path: $called_file_path})
-                            WITH caller, called
-                            WHERE caller IS NOT NULL AND called IS NOT NULL
-                            MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                            RETURN count(*) as created
-                        """, call_params)
-
-                # Try Class caller -> Function callee
-                if not self._safe_run_create(session, """
-                    OPTIONAL MATCH (caller:Class {name: $caller_name, path: $caller_file_path})
-                    OPTIONAL MATCH (called:Function {name: $called_name, path: $called_file_path})
-                    WITH caller, called
-                    WHERE caller IS NOT NULL AND called IS NOT NULL
-                    MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                    RETURN count(*) as created
-                """, call_params):
-
-                    # Try Class caller -> Class.__init__ / constructor
-                    if not self._safe_run_create(session, """
-                        OPTIONAL MATCH (caller:Class {name: $caller_name, path: $caller_file_path})
-                        OPTIONAL MATCH (called:Class {name: $called_name, path: $called_file_path})
-                        OPTIONAL MATCH (called)-[:CONTAINS]->(init:Function)
-                        WHERE init.name IN ["__init__", "constructor"]
-                        WITH caller, init
-                        WHERE caller IS NOT NULL AND init IS NOT NULL
-                        MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(init)
-                        RETURN count(*) as created
-                    """, call_params):
-                        # No __init__ - link directly to the Class node
-                        if not self._safe_run_create(session, """
-                            OPTIONAL MATCH (caller:Class {name: $caller_name, path: $caller_file_path})
-                            OPTIONAL MATCH (called:Class {name: $called_name, path: $called_file_path})
-                            WITH caller, called
-                            WHERE caller IS NOT NULL AND called IS NOT NULL
-                            MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                            RETURN count(*) as created
-                        """, call_params):
-                            # Fallback: Relaxed Global Search (Function caller -> any Function callee)
-                            if not self._safe_run_create(session, """
-                                OPTIONAL MATCH (caller:Function {name: $caller_name, path: $caller_file_path})
-                                OPTIONAL MATCH (called:Function {name: $called_name})
-                                WITH caller, called
-                                WHERE caller IS NOT NULL AND called IS NOT NULL
-                                MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                            """, call_params):
-                                # Fallback: Class caller -> any Function callee
-                                self._safe_run_create(session, """
-                                    OPTIONAL MATCH (caller:Class {name: $caller_name, path: $caller_file_path})
-                                    OPTIONAL MATCH (called:Function {name: $called_name})
-                                    WITH caller, called
-                                    WHERE caller IS NOT NULL AND called IS NOT NULL
-                                    MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                                """, call_params)
             else:
                 # File-level calls: Try Function first, then Class
                 call_params = self._sanitize_props({
@@ -876,55 +893,87 @@ class GraphBuilder:
                     'args': call.get('args', []),
                     'full_call_name': call.get('full_name', called_name)
                 })
+                
+                call_params['caller_pk'] = caller_file_path # File paths are their own PK
 
-
-                if not self._safe_run_create(session, """
-                    OPTIONAL MATCH (caller:File {path: $caller_file_path})
-                    OPTIONAL MATCH (called:Function {name: $called_name, path: $called_file_path})
-                    WITH caller, called
-                    WHERE caller IS NOT NULL AND called IS NOT NULL
-                    MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                    RETURN count(*) as created
-                """, call_params):
-
-                    # Try File caller -> Class.__init__ / constructor
-                    if not self._safe_run_create(session, """
-                        OPTIONAL MATCH (caller:File {path: $caller_file_path})
-                        OPTIONAL MATCH (called:Class {name: $called_name, path: $called_file_path})
-                        OPTIONAL MATCH (called)-[:CONTAINS]->(init:Function)
-                        WHERE init.name IN ["__init__", "constructor"]
-                        WITH caller, init
-                        WHERE caller IS NOT NULL AND init IS NOT NULL
-                        MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(init)
-                        RETURN count(*) as created
-                    """, call_params):
-                        # No __init__ - link directly to the Class node
-                        if not self._safe_run_create(session, """
-                            OPTIONAL MATCH (caller:File {path: $caller_file_path})
-                            OPTIONAL MATCH (called:Class {name: $called_name, path: $called_file_path})
-                            WITH caller, called
-                            WHERE caller IS NOT NULL AND called IS NOT NULL
+                if resolved_path:
+                    if (called_name, resolved_path) in self.exact_functions:
+                        call_params['called_pk'] = self.exact_functions[(called_name, resolved_path)]
+                        batch_queries.append(("""
+                            MATCH (caller:File {path: $caller_file_path})
+                            MATCH (called:Function {name: $called_name, path: $called_file_path})
                             MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                            RETURN count(*) as created
-                        """, call_params):
-                            # Fallback: Relaxed Global Search (File -> any Function)
-                            self._safe_run_create(session, """
-                                OPTIONAL MATCH (caller:File {path: $caller_file_path})
-                                OPTIONAL MATCH (called:Function {name: $called_name})
-                                WITH caller, called
-                                WHERE caller IS NOT NULL AND called IS NOT NULL
+                        """, call_params))
+                    elif (called_name, resolved_path) in self.exact_classes:
+                        call_params['called_pk'] = self.exact_classes[(called_name, resolved_path)]
+                        if (called_name, resolved_path) in self._exact_class_has_init:
+                            init_pk = self._exact_class_has_init[(called_name, resolved_path)]
+                            call_params['init_pk'] = init_pk
+                            batch_queries.append(("""
+                                MATCH (caller:File {path: $caller_file_path})
+                                MATCH (called:Class {name: $called_name, path: $called_file_path})
+                                MATCH (called)-[:CONTAINS]->(init:Function)
+                                WHERE init.name IN ["__init__", "constructor"]
+                                MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(init)
+                            """, call_params))
+                        else:
+                            batch_queries.append(("""
+                                MATCH (caller:File {path: $caller_file_path})
+                                MATCH (called:Class {name: $called_name, path: $called_file_path})
                                 MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                            """, call_params)
+                            """, call_params))
+                    else:
+                        batch_queries.append(("""
+                            MATCH (caller:File {path: $caller_file_path})
+                            MATCH (called:Function {name: $called_name})
+                            MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
+                        """, call_params))
+                else:
+                    batch_queries.append(("""
+                        MATCH (caller:File {path: $caller_file_path})
+                        MATCH (called:Function {name: $called_name})
+                        MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
+                    """, call_params))
 
     def _create_all_function_calls(self, all_file_data: list[Dict], imports_map: dict):
         """Create CALLS relationships for all functions after all files have been processed."""
+        import time
+        start_cache_prep = time.time()
         debug_log(f"_create_all_function_calls called with {len(all_file_data)} files")
+        self._populate_resolution_cache(all_file_data)
+        print(f"[AST Processing] Resolution cache built in {time.time() - start_cache_prep:.2f} seconds.", flush=True)
+        
         with self.driver.session() as session:
+            batch_support = hasattr(session, 'run_batch')
+            batch_queries = []
+            
+            queue_start_time = time.time()
             for idx, file_data in enumerate(all_file_data):
-                debug_log(f"Processing file {idx+1}/{len(all_file_data)}: {file_data.get('path', 'unknown')}")
-                self._create_function_calls(session, file_data, imports_map)
+                # debug_log(f"Processing function calls for file {idx+1}/{len(all_file_data)}: {file_data.get('path', 'unknown')}")
+                self._create_function_calls(session, file_data, imports_map, batch_queries)
+                
+                # Flush batch periodically
+                if len(batch_queries) > 2000:
+                    print(f"[Python Processing] Prepared 2000 queries in {time.time() - queue_start_time:.2f} seconds. Executing flush...", flush=True)
+                    if batch_support:
+                        session.run_batch(batch_queries)
+                    else:
+                        for query, params in batch_queries:
+                            session.run(query, params)
+                    batch_queries.clear()
+                    queue_start_time = time.time()
+            
+            # Final flush
+            if batch_queries:
+                print(f"[Python Processing] Prepared {len(batch_queries)} remaining queries in {time.time() - queue_start_time:.2f} seconds. Executing flush...", flush=True)
+                if batch_support:
+                    session.run_batch(batch_queries)
+                else:
+                    for query, params in batch_queries:
+                        session.run(query, params)
+                batch_queries.clear()
 
-    def _create_inheritance_links(self, session, file_data: Dict, imports_map: dict):
+    def _create_inheritance_links(self, session, file_data: Dict, imports_map: dict, batch_queries: list):
         """Create INHERITS relationships with a more robust resolution logic."""
         caller_file_path = file_data['path']
         local_class_names = {c['name'] for c in file_data.get('classes', [])}
@@ -978,18 +1027,27 @@ class GraphBuilder:
                 
                 # If a path was found, create the relationship
                 if resolved_path:
-                    session.run("""
+                    params = {
+                        'child_name': class_item['name'],
+                        'path': caller_file_path,
+                        'parent_name': target_class_name,
+                        'resolved_parent_file_path': resolved_path
+                    }
+                    
+                    # Optimistic PK injection
+                    child_pk = self.exact_classes.get((class_item['name'], caller_file_path))
+                    parent_pk = self.exact_classes.get((target_class_name, resolved_path))
+                    if child_pk: params['child_pk'] = child_pk
+                    if parent_pk: params['parent_pk'] = parent_pk
+                    
+                    batch_queries.append(("""
                         MATCH (child:Class {name: $child_name, path: $path})
                         MATCH (parent:Class {name: $parent_name, path: $resolved_parent_file_path})
                         MERGE (child)-[:INHERITS]->(parent)
-                    """,
-                    child_name=class_item['name'],
-                    path=caller_file_path,
-                    parent_name=target_class_name,
-                    resolved_parent_file_path=resolved_path)
+                    """, params))
 
 
-    def _create_csharp_inheritance_and_interfaces(self, session, file_data: Dict, imports_map: dict):
+    def _create_csharp_inheritance_and_interfaces(self, session, file_data: Dict, imports_map: dict, batch_queries: list):
         """Create INHERITS and IMPLEMENTS relationships for C# types."""
         if file_data.get('lang') != 'c_sharp':
             return
@@ -1033,47 +1091,86 @@ class GraphBuilder:
                     # Try to determine if it's an interface
                     if is_interface or (base_index > 0 and type_label == 'Class'):
                         # This is an IMPLEMENTS relationship
-                        session.run("""
+                        batch_queries.append(("""
                             MATCH (child {name: $child_name, path: $path})
                             WHERE child:Class OR child:Struct OR child:Record
                             MATCH (iface:Interface {name: $interface_name})
                             MERGE (child)-[:IMPLEMENTS]->(iface)
-                        """,
-                        child_name=type_item['name'],
-                        path=caller_file_path,
-                        interface_name=base_name)
+                        """, {
+                            'child_name': type_item['name'],
+                            'path': caller_file_path,
+                            'interface_name': base_name
+                        }))
                     else:
                         # This is an INHERITS relationship
-                        session.run("""
+                        batch_queries.append(("""
                             MATCH (child {name: $child_name, path: $path})
                             WHERE child:Class OR child:Record OR child:Interface
                             MATCH (parent {name: $parent_name})
                             WHERE parent:Class OR parent:Record OR parent:Interface
                             MERGE (child)-[:INHERITS]->(parent)
-                        """,
-                        child_name=type_item['name'],
-                        path=caller_file_path,
-                        parent_name=base_name)
+                        """, {
+                            'child_name': type_item['name'],
+                            'path': caller_file_path,
+                            'parent_name': base_name
+                        }))
 
     def _create_all_inheritance_links(self, all_file_data: list[Dict], imports_map: dict):
         """Create INHERITS relationships for all classes after all files have been processed."""
         with self.driver.session() as session:
+            batch_support = hasattr(session, 'run_batch')
+            batch_queries = []
+            
             for file_data in all_file_data:
                 # Handle C# separately
                 if file_data.get('lang') == 'c_sharp':
-                    self._create_csharp_inheritance_and_interfaces(session, file_data, imports_map)
+                    self._create_csharp_inheritance_and_interfaces(session, file_data, imports_map, batch_queries)
                 else:
-                    self._create_inheritance_links(session, file_data, imports_map)
+                    self._create_inheritance_links(session, file_data, imports_map, batch_queries)
+                
+                # Periodically flush the batch to prevent memory blooming or hitting API limits
+                if len(batch_queries) >= 2000:
+                    if batch_support:
+                        session.run_batch(batch_queries)
+                    else:
+                        for query, params in batch_queries:
+                            session.run(query, params)
+                    batch_queries.clear()
+                    
+            if batch_queries:
+                if batch_support:
+                    session.run_batch(batch_queries)
+                else:
+                    for query, params in batch_queries:
+                        session.run(query, params)
+                batch_queries.clear()
                 
     def delete_file_from_graph(self, file_uri: str):
         """Deletes a file and all its contained elements and relationships."""
         file_path_str = file_uri
         with self.driver.session() as session:
-            parents_res = session.run("""
-                MATCH (f:File {path: $path})<-[:CONTAINS*]-(d:Directory)
-                RETURN d.path as path ORDER BY d.path DESC
-            """, path=file_path_str)
-            parent_paths = [record["path"] for record in parents_res]
+            try:
+                parents_res = session.run("""
+                    MATCH (f:File {path: $path})<-[:CONTAINS*]-(d:Directory)
+                    RETURN d.path as path ORDER BY d.path DESC
+                """, path=file_path_str)
+                parent_paths = [record["path"] for record in parents_res]
+            except Exception:
+                # Fallback for Spanner and backends that do not support variable-length paths
+                parent_paths = []
+                if "$" in file_path_str:
+                    repo_uri, relative_path = file_path_str.split("$", 1)
+                    parts = __import__('pathlib').Path(relative_path).parts[:-1]
+                    current_parent = repo_uri
+                    parent_label = 'Repository'
+                    for part in parts:
+                        if parent_label == 'Repository':
+                            current_path_str = f"{current_parent}${part}"
+                        else:
+                            current_path_str = f"{current_parent}/{part}"
+                        parent_paths.insert(0, current_path_str)
+                        current_parent = current_path_str
+                        parent_label = 'Directory'
 
             session.run(
                 """
@@ -1703,12 +1800,16 @@ class GraphBuilder:
             all_file_data = []
 
             processed_count = 0
+            import time
             for file in files:
                 if file.is_file():
                     if job_id:
                         self.job_manager.update_job(job_id, current_file=str(file))
                     repo_path = path.resolve() if path.is_dir() else file.parent.resolve()
+                    
+                    parse_t0 = time.time()
                     file_data = self.parse_file(repo_path, file, is_dependency)
+                    parse_t1 = time.time()
                     
                     rewrite_paths(file_data, repo_path, virtual_repo_name)
                     
@@ -1717,7 +1818,11 @@ class GraphBuilder:
                     # can still be represented as minimal File nodes in the graph.
                     if "error" not in file_data:
                         try:
+                            add_t0 = time.time()
                             self.add_file_to_graph(file_data, repo_name, imports_map)
+                            add_t1 = time.time()
+                            if parse_t1-parse_t0 > 0.1 or add_t1-add_t0 > 0.1:
+                                print(f"[AST Process] {file.name}: parsed in {parse_t1-parse_t0:.3f}s | added to batch in {add_t1-add_t0:.3f}s", flush=True)
                         except Exception as file_err:
                             # Re-raise with the offending file path so the user
                             # can identify which source file triggered the error.

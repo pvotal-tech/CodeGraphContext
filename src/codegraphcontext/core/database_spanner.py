@@ -487,10 +487,21 @@ class SpannerSessionWrapper:
                     match_lines = [line.strip() for line in prefix.split("\n") if re.match(r'^(MATCH|OPTIONAL MATCH|WITH|WHERE)\b', line.strip(), re.IGNORECASE)]
                     gql_prefix = "\n".join(match_lines)
                     if gql_prefix:
+                        import time
                         gql_query = gql_prefix + "\nRETURN " + ", ".join(fields_to_return)
                         formatted_gql, formatted_params = self._format_gql(gql_query, params)
+                        t0 = time.time()
                         results = transaction.execute_sql(formatted_gql, params=formatted_params)
                         rows = [dict(zip([f.name for f in results.fields], row)) for row in results]
+                        t1 = time.time()
+                        if not hasattr(self, '_execute_sql_time'): self._execute_sql_time = 0
+                        self._execute_sql_time += (t1 - t0)
+                        
+                        # Hack to print cumulative time occasionally
+                        if not hasattr(self, '_execute_sql_count'): self._execute_sql_count = 0
+                        self._execute_sql_count += 1
+                        if self._execute_sql_count % 1000 == 0:
+                            print(f"[Spanner Performance] Cumulative execute_sql lookups: {self._execute_sql_count} calls, total time: {self._execute_sql_time:.2f}s", flush=True)
                         
                 # Fallback if logic is a pure MERGE without MATCH sequence or no rows found
                 if not rows:
@@ -535,10 +546,14 @@ class SpannerSessionWrapper:
             all_translations.extend(translations)
             
         if all_translations:
-            info_logger(f"[Spanner Batch] Executing combined transaction of {len(all_translations)} DML mutations gathered from {len(batch_queries)} GQL statements.")
+            import time
+            print(f"[Spanner Batch] Executing combined transaction of {len(all_translations)} DML mutations gathered from {len(batch_queries)} GQL statements.", flush=True)
             def execute_all_mutations(transaction):
                 self._execute_translations(transaction, all_translations)
+            start_time = time.time()
             self.database.run_in_transaction(execute_all_mutations)
+            end_time = time.time()
+            print(f"[Spanner Batch] Transaction completed in {end_time - start_time:.2f} seconds.", flush=True)
 
     def run(self, query, **parameters):
         # 0. Alias the return clause to ensure GQL compliance
