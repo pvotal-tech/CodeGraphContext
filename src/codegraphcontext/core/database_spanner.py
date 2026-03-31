@@ -8,23 +8,23 @@ from typing import Optional, Tuple, Dict, Any, List
 from codegraphcontext.utils.debug_log import debug_log, info_logger, error_logger, warning_logger
 
 NODE_TABLES = {
-    "Repository": {"schema": "path STRING(MAX) NOT NULL, name STRING(MAX), is_dependency BOOL", "pk": "path"},
-    "File": {"schema": "path STRING(MAX) NOT NULL, name STRING(MAX), relative_path STRING(MAX), is_dependency BOOL", "pk": "path"},
-    "Directory": {"schema": "path STRING(MAX) NOT NULL, name STRING(MAX)", "pk": "path"},
-    "Module": {"schema": "name STRING(MAX) NOT NULL, lang STRING(MAX), full_import_name STRING(MAX)", "pk": "name"},
-    "Function": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), cyclomatic_complexity INT64, context STRING(MAX), context_type STRING(MAX), class_context STRING(MAX), is_dependency BOOL, decorators ARRAY<STRING(MAX)>, args ARRAY<STRING(MAX)>", "pk": "uid"},
-    "Class": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL, decorators ARRAY<STRING(MAX)>", "pk": "uid"},
-    "Variable": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), value STRING(MAX), context STRING(MAX), is_dependency BOOL", "pk": "uid"},
-    "Trait": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL", "pk": "uid"},
-    "Interface": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL", "pk": "uid"},
-    "Macro": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL", "pk": "uid"},
-    "Struct": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL", "pk": "uid"},
-    "Enum": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL", "pk": "uid"},
-    "Union": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL", "pk": "uid"},
-    "Annotation": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL", "pk": "uid"},
-    "Record": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL", "pk": "uid"},
-    "Property": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL", "pk": "uid"},
-    "Parameter": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), function_line_number INT64", "pk": "uid"},
+    "Repository": {"schema": "path STRING(MAX) NOT NULL, name STRING(MAX), is_dependency BOOL, properties JSON", "pk": "path"},
+    "File": {"schema": "path STRING(MAX) NOT NULL, name STRING(MAX), relative_path STRING(MAX), is_dependency BOOL, properties JSON", "pk": "path"},
+    "Directory": {"schema": "path STRING(MAX) NOT NULL, name STRING(MAX), properties JSON", "pk": "path"},
+    "Module": {"schema": "name STRING(MAX) NOT NULL, lang STRING(MAX), full_import_name STRING(MAX), properties JSON", "pk": "name"},
+    "Function": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), cyclomatic_complexity INT64, is_dependency BOOL, properties JSON, decorators ARRAY<STRING(MAX)> AS (JSON_VALUE_ARRAY(properties, '$.decorators')) STORED, args ARRAY<STRING(MAX)> AS (JSON_VALUE_ARRAY(properties, '$.args')) STORED, context STRING(MAX) AS (JSON_VALUE(properties, '$.context')) STORED, context_type STRING(MAX) AS (JSON_VALUE(properties, '$.context_type')) STORED, class_context STRING(MAX) AS (JSON_VALUE(properties, '$.class_context')) STORED", "pk": "uid"},
+    "Class": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL, properties JSON, decorators ARRAY<STRING(MAX)> AS (JSON_VALUE_ARRAY(properties, '$.decorators')) STORED, context STRING(MAX) AS (JSON_VALUE(properties, '$.context')) STORED, context_type STRING(MAX) AS (JSON_VALUE(properties, '$.context_type')) STORED, class_context STRING(MAX) AS (JSON_VALUE(properties, '$.class_context')) STORED", "pk": "uid"},
+    "Variable": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), value STRING(MAX), type STRING(MAX), is_dependency BOOL, properties JSON, decorators ARRAY<STRING(MAX)> AS (JSON_VALUE_ARRAY(properties, '$.decorators')) STORED, context STRING(MAX) AS (JSON_VALUE(properties, '$.context')) STORED, class_context STRING(MAX) AS (JSON_VALUE(properties, '$.class_context')) STORED", "pk": "uid"},
+    "Trait": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL, properties JSON, decorators ARRAY<STRING(MAX)> AS (JSON_VALUE_ARRAY(properties, '$.decorators')) STORED, context STRING(MAX) AS (JSON_VALUE(properties, '$.context')) STORED, context_type STRING(MAX) AS (JSON_VALUE(properties, '$.context_type')) STORED, class_context STRING(MAX) AS (JSON_VALUE(properties, '$.class_context')) STORED", "pk": "uid"},
+    "Interface": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL, properties JSON, decorators ARRAY<STRING(MAX)> AS (JSON_VALUE_ARRAY(properties, '$.decorators')) STORED, context STRING(MAX) AS (JSON_VALUE(properties, '$.context')) STORED, context_type STRING(MAX) AS (JSON_VALUE(properties, '$.context_type')) STORED, class_context STRING(MAX) AS (JSON_VALUE(properties, '$.class_context')) STORED", "pk": "uid"},
+    "Macro": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL, properties JSON, decorators ARRAY<STRING(MAX)> AS (JSON_VALUE_ARRAY(properties, '$.decorators')) STORED, context STRING(MAX) AS (JSON_VALUE(properties, '$.context')) STORED, context_type STRING(MAX) AS (JSON_VALUE(properties, '$.context_type')) STORED, class_context STRING(MAX) AS (JSON_VALUE(properties, '$.class_context')) STORED", "pk": "uid"},
+    "Struct": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL, properties JSON, decorators ARRAY<STRING(MAX)> AS (JSON_VALUE_ARRAY(properties, '$.decorators')) STORED, context STRING(MAX) AS (JSON_VALUE(properties, '$.context')) STORED, context_type STRING(MAX) AS (JSON_VALUE(properties, '$.context_type')) STORED, class_context STRING(MAX) AS (JSON_VALUE(properties, '$.class_context')) STORED", "pk": "uid"},
+    "Enum": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL, properties JSON, decorators ARRAY<STRING(MAX)> AS (JSON_VALUE_ARRAY(properties, '$.decorators')) STORED, context STRING(MAX) AS (JSON_VALUE(properties, '$.context')) STORED, context_type STRING(MAX) AS (JSON_VALUE(properties, '$.context_type')) STORED, class_context STRING(MAX) AS (JSON_VALUE(properties, '$.class_context')) STORED", "pk": "uid"},
+    "Union": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL, properties JSON, decorators ARRAY<STRING(MAX)> AS (JSON_VALUE_ARRAY(properties, '$.decorators')) STORED, context STRING(MAX) AS (JSON_VALUE(properties, '$.context')) STORED, context_type STRING(MAX) AS (JSON_VALUE(properties, '$.context_type')) STORED, class_context STRING(MAX) AS (JSON_VALUE(properties, '$.class_context')) STORED", "pk": "uid"},
+    "Annotation": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL, properties JSON, decorators ARRAY<STRING(MAX)> AS (JSON_VALUE_ARRAY(properties, '$.decorators')) STORED, context STRING(MAX) AS (JSON_VALUE(properties, '$.context')) STORED, context_type STRING(MAX) AS (JSON_VALUE(properties, '$.context_type')) STORED, class_context STRING(MAX) AS (JSON_VALUE(properties, '$.class_context')) STORED", "pk": "uid"},
+    "Record": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL, properties JSON, decorators ARRAY<STRING(MAX)> AS (JSON_VALUE_ARRAY(properties, '$.decorators')) STORED, context STRING(MAX) AS (JSON_VALUE(properties, '$.context')) STORED, context_type STRING(MAX) AS (JSON_VALUE(properties, '$.context_type')) STORED, class_context STRING(MAX) AS (JSON_VALUE(properties, '$.class_context')) STORED", "pk": "uid"},
+    "Property": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), line_number INT64, end_line INT64, source STRING(MAX), docstring STRING(MAX), lang STRING(MAX), is_dependency BOOL, properties JSON, decorators ARRAY<STRING(MAX)> AS (JSON_VALUE_ARRAY(properties, '$.decorators')) STORED, context STRING(MAX) AS (JSON_VALUE(properties, '$.context')) STORED, context_type STRING(MAX) AS (JSON_VALUE(properties, '$.context_type')) STORED, class_context STRING(MAX) AS (JSON_VALUE(properties, '$.class_context')) STORED", "pk": "uid"},
+    "Parameter": {"schema": "uid STRING(MAX) NOT NULL, name STRING(MAX), path STRING(MAX), function_line_number INT64, properties JSON", "pk": "uid"},
 }
 
 EDGE_TABLES = {
@@ -38,7 +38,7 @@ EDGE_TABLES = {
             ("Directory", "Directory"), ("Directory", "File"), 
             ("Repository", "File"), ("Class", "Function"), ("Function", "Function")
         ],
-        "properties": ""
+        "properties": ", properties JSON"
     },
     "CALLS": {
         "pairs": [
@@ -46,27 +46,27 @@ EDGE_TABLES = {
             ("File", "Function"), ("File", "Class"), 
             ("Class", "Function"), ("Class", "Class")
         ],
-        "properties": ", line_number INT64, args ARRAY<STRING(MAX)>, full_call_name STRING(MAX)"
+        "properties": ", line_number INT64, args ARRAY<STRING(MAX)>, full_call_name STRING(MAX), properties JSON"
     },
     "IMPORTS": {
         "pairs": [("File", "Module")],
-        "properties": ", alias STRING(MAX), full_import_name STRING(MAX), imported_name STRING(MAX), line_number INT64"
+        "properties": ", alias STRING(MAX), full_import_name STRING(MAX), imported_name STRING(MAX), line_number INT64, properties JSON"
     },
     "INHERITS": {
         "pairs": [("Class", "Class"), ("Record", "Record"), ("Interface", "Interface")],
-        "properties": ""
+        "properties": ", properties JSON"
     },
     "HAS_PARAMETER": {
         "pairs": [("Function", "Parameter")],
-        "properties": ""
+        "properties": ", properties JSON"
     },
     "INCLUDES": {
         "pairs": [("Class", "Module")],
-        "properties": ""
+        "properties": ", properties JSON"
     },
     "IMPLEMENTS": {
         "pairs": [("Class", "Interface"), ("Struct", "Interface"), ("Record", "Interface")],
-        "properties": ""
+        "properties": ", properties JSON"
     }
 }
 
@@ -424,6 +424,38 @@ class SpannerSessionWrapper:
     def __exit__(self, exc_type, exc_val, exc_tb):
         return False
 
+    def _format_gql(self, query, parameters):
+        import re
+        gql_query = query
+        if not gql_query.strip().upper().startswith("GRAPH"):
+            gql_query = f"GRAPH {self.graph_name}\n{gql_query}"
+            
+        # Spanner GQL variables are @var instead of $var
+        gql_query = re.sub(r'\$(\w+)', r'@\1', gql_query)
+        
+        # Translate Cypher string matching operators to Spanner Google SQL equivalents
+        expr_pat = r'((?:\w+\([\w\.@\'"]+\))|[\w\.@\'"]+)'
+        gql_query = re.sub(rf'(?i){expr_pat}\s+CONTAINS\s+{expr_pat}', r'STRPOS(\1, \2) > 0', gql_query)
+        gql_query = re.sub(rf'(?i){expr_pat}\s+STARTS\s+WITH\s+{expr_pat}', r'STARTS_WITH(\1, \2)', gql_query)
+        gql_query = re.sub(rf'(?i){expr_pat}\s+ENDS\s+WITH\s+{expr_pat}', r'ENDS_WITH(\1, \2)', gql_query)
+        
+        # Translate Cypher functions
+        gql_query = re.sub(r'(?i)\btoLower\(', 'LOWER(', gql_query)
+        
+        # Wrap all node and edge labels in backticks to prevent reserved word collisions
+        gql_query = re.sub(r'\[([a-zA-Z0-9_]*):([a-zA-Z0-9_]+)', r'[\1:`\2`', gql_query)
+        gql_query = re.sub(r'\(([a-zA-Z0-9_]*):([a-zA-Z0-9_]+)', r'(\1:`\2`', gql_query)
+        
+        # Guard against nested dicts leaking into GQL execution engine
+        safe_parameters = {}
+        for k, v in parameters.items():
+            if isinstance(v, (dict, list)):
+                safe_parameters[k] = str(v)
+            else:
+                safe_parameters[k] = v
+
+        return gql_query, safe_parameters
+
     def run(self, query, **parameters):
         # 0. Alias the return clause to ensure GQL compliance
         aliased_query, col_map = _auto_alias_return_clause(query)
@@ -460,8 +492,73 @@ class SpannerSessionWrapper:
                     return SpannerResultWrapper([])
                     
                 def execute_mutation(transaction):
-                    for sql_query, sql_params in translations:
-                        transaction.execute_update(sql_query, params=sql_params)
+                    for sql_op in translations:
+                        if isinstance(sql_op, tuple):
+                            sql_query, sql_params = sql_op
+                            transaction.execute_update(sql_query, params=sql_params)
+                        elif isinstance(sql_op, dict) and sql_op.get("type") == "edge_merge":
+                            import uuid
+                            import json
+                            import re
+                            prefix = sql_op["match_query_prefix"]
+                            src_var, dst_var = sql_op["src_var"], sql_op["dst_var"]
+                            src_pk, dst_pk = sql_op["src_pk"], sql_op["dst_pk"]
+                            
+                            params = sql_op["original_parameters"]
+                            
+                            # Use bound generated PKs from same-transaction MERGE operations if available
+                            src_val = params.get(f"{src_var}_pk", params.get(src_pk))
+                            dst_val = params.get(f"{dst_var}_pk", params.get(dst_pk))
+                            
+                            # Determine mapping values from GQL lookup if not provided directly
+                            fields_to_return = []
+                            if not src_val:
+                                fields_to_return.append(f"{src_var}.{src_pk} AS src_pk_val")
+                            if not dst_val:
+                                fields_to_return.append(f"{dst_var}.{dst_pk} AS dst_pk_val")
+                                
+                            rows = []
+                            if fields_to_return:
+                                match_lines = [line.strip() for line in prefix.split("\n") if re.match(r'^(MATCH|OPTIONAL MATCH|WITH|WHERE)\b', line.strip(), re.IGNORECASE)]
+                                gql_prefix = "\n".join(match_lines)
+                                if gql_prefix:
+                                    gql_query = gql_prefix + "\nRETURN " + ", ".join(fields_to_return)
+                                    formatted_gql, formatted_params = self._format_gql(gql_query, params)
+                                    results = transaction.execute_sql(formatted_gql, params=formatted_params)
+                                    rows = [dict(zip([f.name for f in results.fields], row)) for row in results]
+                                    
+                            # Fallback if logic is a pure MERGE without MATCH sequence or no rows found
+                            if not rows:
+                                rows = [{}]
+
+                            for row in rows:
+                                final_src_val = src_val or row.get("src_pk_val") or params.get(src_pk) or f"dummy_{src_var}"
+                                final_dst_val = dst_val or row.get("dst_pk_val") or params.get(dst_pk) or f"dummy_{dst_var}"
+                                    
+                                edge_label = sql_op["edge_label"]
+                                edge_props_raw = sql_op["edge_props_raw"]
+                                edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{edge_label}_{final_src_val}_{final_dst_val}_{edge_props_raw}"))
+                                
+                                final_sql_params = sql_op["sql_params"].copy()
+                                final_sql_params["id"] = edge_id
+                                final_sql_params["src_id"] = final_src_val
+                                final_sql_params["dst_id"] = final_dst_val
+                                
+                                cols, vals = [], []
+                                insert_params = {}
+                                for c, v in final_sql_params.items():
+                                    if isinstance(v, dict):
+                                        cols.append(c)
+                                        vals.append(f"PARSE_JSON(@{c})")
+                                        insert_params[c] = json.dumps(v)
+                                    else:
+                                        cols.append(c)
+                                        vals.append(f"@{c}")
+                                        insert_params[c] = v
+                                
+                                sql = f"INSERT OR UPDATE `{edge_label}` ({', '.join(cols)}) VALUES ({', '.join(vals)})"
+                                transaction.execute_update(sql, params=insert_params)
+
                 self.database.run_in_transaction(execute_mutation)
                 return SpannerResultWrapper([])
             else:
@@ -506,6 +603,13 @@ class SpannerSessionWrapper:
             
             # 1. Node MERGE extraction
             # e.g., MERGE (var:Label {pk: $param, ...})
+            # Regex expects optionally a variable, then a colon, then the label.
+            
+            def guess_pk_name(ntype):
+                if ntype in ['Repository', 'File', 'Directory']: return 'path'
+                if ntype in ['Module']: return 'name'
+                return 'uid'
+                
             for merge_node_match in re.finditer(r'MERGE\s+\(([a-zA-Z0-9_]+):([a-zA-Z0-9_]+)\s*\{([^}]+)\}\)', query):
                 node_var = merge_node_match.group(1)
                 node_label = merge_node_match.group(2)
@@ -528,12 +632,17 @@ class SpannerSessionWrapper:
                         sql_params[k] = val
                         sorted_match_criteria.append((k, str(val)))
                 
-                sorted_match_criteria.sort()
-                hash_payload = f"{node_label}_" + "_".join([f"{k}={v}" for k, v in sorted_match_criteria])
-                
                 import uuid
-                if 'uid' not in sql_params:
-                    sql_params['uid'] = str(uuid.uuid5(uuid.NAMESPACE_OID, hash_payload))
+                if guess_pk_name(node_label) == 'uid':
+                    sorted_match_criteria.sort()
+                    hash_payload = f"{node_label}_" + "_".join([f"{k}={v}" for k, v in sorted_match_criteria])
+                    if 'uid' not in sql_params:
+                        sql_params['uid'] = str(uuid.uuid5(uuid.NAMESPACE_OID, hash_payload))
+                    parameters[f"{node_var}_pk"] = sql_params['uid']
+                else:
+                    pk_name = guess_pk_name(node_label)
+                    if pk_name in sql_params:
+                        parameters[f"{node_var}_pk"] = sql_params[pk_name]
 
                 # Associated SET statements
                 # e.g., SET var += $props
@@ -541,10 +650,26 @@ class SpannerSessionWrapper:
                 if set_plus_match:
                     prop_name = set_plus_match.group(1)
                     props_dict = parameters.get(prop_name, {})
-                    for k, v in props_dict.items():
-                        if isinstance(v, (dict, list)) and k not in ['args', 'decorators']:
+                    properties_json = {}
+                    
+                    # Standard columns we explicitly map (now correctly bounded by DDL declarations instead of a whitelist)
+                    actual_table_cols = set()
+                    node_schema_raw = NODE_TABLES.get(node_label, {"schema": ""})["schema"]
+                    for col_def in node_schema_raw.split(','):
+                        col_def = col_def.strip()
+                        if not col_def or " AS " in col_def or " properties JSON" in col_def:
                             continue
-                        sql_params[k] = v
+                        col_name = col_def.split()[0]
+                        actual_table_cols.add(col_name)
+
+                    for k, v in props_dict.items():
+                        if k in actual_table_cols and not isinstance(v, (dict, list)):
+                            sql_params[k] = v
+                        else:
+                            properties_json[k] = v
+                            
+                    if properties_json:
+                        sql_params['properties'] = properties_json
                         
                 # e.g., SET var.prop = $val
                 for set_prop_match in re.finditer(r'SET\s+' + node_var + r'\.([a-zA-Z0-9_]+)\s*=\s*\$([a-zA-Z0-9_]+)', query):
@@ -610,12 +735,7 @@ class SpannerSessionWrapper:
                 # (e.g. two CALLS relations on different line numbers) don't wrongly upsert over each other.
                 edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{edge_label}_{src_val}_{dst_val}_{edge_props_raw}"))
 
-                sql_params = {
-                    "id": edge_id,
-                    "src_id": src_val,
-                    "dst_id": dst_val
-                }
-
+                edge_sql_params = {}
                 if edge_props_raw:
                     for field in edge_props_raw.split(','):
                         if ':' in field:
@@ -623,66 +743,54 @@ class SpannerSessionWrapper:
                             k = k.strip()
                             target_param = v_raw.strip()[1:]
                             if target_param in parameters:
-                                sql_params[k] = parameters[target_param]
+                                edge_sql_params[k] = parameters[target_param]
                                 
-                # Also handle SET r += $props if an edge var was bound
                 if edge_var:
                     set_edge_plus_match = re.search(r'SET\s+' + edge_var + r'\s*\+=\s*\$([a-zA-Z0-9_]+)', query)
                     if set_edge_plus_match:
                         prop_name = set_edge_plus_match.group(1)
                         props_dict = parameters.get(prop_name, {})
                         for k, v in props_dict.items():
-                            sql_params[k] = v
+                            edge_sql_params[k] = v
 
-                cols = []
-                vals = []
-                final_sql_params = {}
-                for c, v in sql_params.items():
-                    if isinstance(v, dict):
-                        cols.append(c)
-                        vals.append(f"PARSE_JSON(@{c})")
-                        final_sql_params[c] = json.dumps(v)
+                actual_edge_cols = set(["id", "src_id", "dst_id"])
+                edge_props_raw_ddl = EDGE_TABLES.get(edge_label, {"properties": ""})["properties"]
+                for col_def in edge_props_raw_ddl.split(','):
+                    col_def = col_def.strip()
+                    if not col_def or " AS " in col_def or " properties JSON" in col_def:
+                        continue
+                    col_name = col_def.split()[0]
+                    actual_edge_cols.add(col_name)
+
+                final_edge_sql_params = {}
+                edge_properties_json = {}
+                for k, v in edge_sql_params.items():
+                    if k in actual_edge_cols and not isinstance(v, (dict, list)):
+                        final_edge_sql_params[k] = v
                     else:
-                        cols.append(c)
-                        vals.append(f"@{c}")
-                        final_sql_params[c] = v
+                        edge_properties_json[k] = v
+                        
+                if edge_properties_json:
+                    final_edge_sql_params["properties"] = edge_properties_json
 
-                table_name = edge_label
-                sql_query = f"INSERT OR UPDATE `{table_name}` ({', '.join(cols)}) VALUES ({', '.join(vals)})"
-                sql_ops.append((sql_query, final_sql_params))
+                sql_ops.append({
+                    "type": "edge_merge",
+                    "sql_params": final_edge_sql_params,
+                    "edge_label": edge_label,
+                    "edge_props_raw": edge_props_raw,
+                    "src_var": src_var,
+                    "dst_var": dst_var,
+                    "src_pk": src_pk,
+                    "dst_pk": dst_pk,
+                    "match_query_prefix": query[:merge_edge_match.start()],
+                    "original_parameters": parameters
+                })
 
             if sql_ops:
                 return sql_ops, True
 
         # Pure GQL fallback for reads (MATCH)
-        gql_query = query
-        if not gql_query.strip().upper().startswith("GRAPH"):
-            gql_query = f"GRAPH {self.graph_name}\n{gql_query}"
-            
-        # Spanner GQL variables are @var instead of $var
-        gql_query = re.sub(r'\$(\w+)', r'@\1', gql_query)
-        
-        # Translate Cypher string matching operators to Spanner Google SQL equivalents
-        expr_pat = r'((?:\w+\([\w\.@\'"]+\))|[\w\.@\'"]+)'
-        gql_query = re.sub(rf'(?i){expr_pat}\s+CONTAINS\s+{expr_pat}', r'STRPOS(\1, \2) > 0', gql_query)
-        gql_query = re.sub(rf'(?i){expr_pat}\s+STARTS\s+WITH\s+{expr_pat}', r'STARTS_WITH(\1, \2)', gql_query)
-        gql_query = re.sub(rf'(?i){expr_pat}\s+ENDS\s+WITH\s+{expr_pat}', r'ENDS_WITH(\1, \2)', gql_query)
-        
-        # Translate Cypher functions
-        gql_query = re.sub(r'(?i)\btoLower\(', 'LOWER(', gql_query)
-        
-        # Wrap all node and edge labels in backticks to prevent reserved word collisions
-        gql_query = re.sub(r'\[([a-zA-Z0-9_]*):([a-zA-Z0-9_]+)', r'[\1:`\2`', gql_query)
-        gql_query = re.sub(r'\(([a-zA-Z0-9_]*):([a-zA-Z0-9_]+)', r'(\1:`\2`', gql_query)
-        
-        # Guard against nested dicts leaking into GQL execution engine
-        safe_parameters = {}
-        for k, v in parameters.items():
-            if isinstance(v, (dict, list)):
-                safe_parameters[k] = str(v)
-            else:
-                safe_parameters[k] = v
-
+        gql_query, safe_parameters = self._format_gql(query, parameters)
         return (gql_query, safe_parameters), False
 
 class SpannerDriverWrapper:

@@ -512,9 +512,9 @@ class GraphBuilder:
             for item in file_data.get('functions', []):
                 if item.get("context_type") == "function_definition":
                     session.run("""
-                        MATCH (outer:Function {name: $context, path: $path})
+                        MATCH (outer_fn:Function {name: $context, path: $path})
                         MATCH (inner:Function {name: $name, path: $path, line_number: $line_number})
-                        MERGE (outer)-[:CONTAINS]->(inner)
+                        MERGE (outer_fn)-[:CONTAINS]->(inner)
                     """, context=item["context"], path=file_path_str, name=item["name"], line_number=item["line_number"])
 
             # Handle imports and create IMPORTS relationships
