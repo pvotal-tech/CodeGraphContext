@@ -458,6 +458,7 @@ class SpannerSessionWrapper:
 
     def _execute_translations(self, transaction, translations):
         import google.cloud.spanner as spanner
+        from google.cloud.spanner_v1.data_types import JsonObject
         import uuid
         import json
         import re
@@ -533,7 +534,10 @@ class SpannerSessionWrapper:
             vals_list = []
             for k, v in op["_params"].items():
                 cols_list.append(k)
-                vals_list.append(v)
+                if isinstance(v, dict):
+                    vals_list.append(JsonObject(v))
+                else:
+                    vals_list.append(v)
                     
             mutations_by_table[table].append({"cols": tuple(cols_list), "vals": vals_list})
 
@@ -566,7 +570,10 @@ class SpannerSessionWrapper:
             vals_list = []
             for k, v in final_sql_params.items():
                 cols_list.append(k)
-                vals_list.append(v)
+                if isinstance(v, dict):
+                    vals_list.append(JsonObject(v))
+                else:
+                    vals_list.append(v)
 
             mutations_by_table[edge_label].append({"cols": tuple(cols_list), "vals": vals_list})
             
