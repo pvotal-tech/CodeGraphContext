@@ -1043,8 +1043,6 @@ class GraphBuilder:
         import time
         start_cache_prep = time.time()
         debug_log(f"_create_all_function_calls called with {len(all_file_data)} files")
-        self._populate_resolution_cache(all_file_data)
-        debug_log(f"Resolution cache built in {time.time() - start_cache_prep:.2f} seconds.")
         
         with self.driver.session() as session:
             batch_support = hasattr(session, 'run_batch')
@@ -2018,6 +2016,7 @@ class GraphBuilder:
                             session.run(query)
                     global_batch.clear()
 
+            self._populate_resolution_cache(all_file_data)
             self._create_all_inheritance_links(all_file_data, imports_map)
             self._create_all_function_calls(all_file_data, imports_map)
             
