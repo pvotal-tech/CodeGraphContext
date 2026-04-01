@@ -5,6 +5,12 @@ import json
 import importlib
 import stdlibs
 import sys
+
+# Preserve standard output for JSON-RPC communication
+_mcp_stdout = sys.stdout
+# Redirect sys.stdout to sys.stderr to prevent unexpected print() calls from breaking the protocol
+sys.stdout = sys.stderr
+
 import traceback
 import os
 import re
@@ -314,7 +320,7 @@ class MCPServer:
                 
                 # Send the response to standard output if it's not a notification.
                 if request_id is not None and response:
-                    print(json.dumps(response), flush=True)
+                    print(json.dumps(response), file=_mcp_stdout, flush=True)
 
             except Exception as e:
                 error_logger(f"Error processing request: {e}\n{traceback.format_exc()}")
@@ -326,7 +332,7 @@ class MCPServer:
                     "jsonrpc": "2.0", "id": request_id,
                     "error": {"code": -32603, "message": f"Internal error: {str(e)}", "data": traceback.format_exc()}
                 }
-                print(json.dumps(error_response), flush=True)
+                print(json.dumps(error_response), file=_mcp_stdout, flush=True)
 
     def shutdown(self):
         """Gracefully shuts down the server and its components."""
