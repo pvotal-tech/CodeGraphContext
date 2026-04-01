@@ -462,25 +462,15 @@ class SpannerSessionWrapper:
         import json
         import re
 
-        def get_ptypes(p):
-            pt = {}
-            for k, v in p.items():
-                if isinstance(v, str): pt[k] = spanner.param_types.STRING
-                elif isinstance(v, bool): pt[k] = spanner.param_types.BOOL
-                elif isinstance(v, int): pt[k] = spanner.param_types.INT64
-                elif isinstance(v, float): pt[k] = spanner.param_types.FLOAT64
-                elif isinstance(v, list): pt[k] = spanner.param_types.Array(spanner.param_types.STRING)
-            return pt
-
-        batch_statements = []
+        node_merges = []
         edge_merges = []
 
         for sql_op in translations:
-            if isinstance(sql_op, tuple):
-                sql_query, sql_params = sql_op
-                batch_statements.append((sql_query, sql_params, get_ptypes(sql_params)))
-            elif isinstance(sql_op, dict) and sql_op.get("type") == "edge_merge":
-                edge_merges.append(sql_op)
+            if isinstance(sql_op, dict):
+                if sql_op.get("type") == "node_merge":
+                    node_merges.append(sql_op)
+                elif sql_op.get("type") == "edge_merge":
+                    edge_merges.append(sql_op)
 
         # PASS 1: Bulk Resolution
         scalar_subqueries = []
@@ -530,8 +520,26 @@ class SpannerSessionWrapper:
                 results = transaction.execute_sql(chunk_sql, params=chunk_params)
                 for row in results:
                     resolved_ids.update(dict(zip([f.name for f in results.fields], row)))
+        
+        # PASS 2: Mutation Construction
+        mutations_by_table = {}
+        
+        for op in node_merges:
+            table = op["table"]
+            if table not in mutations_by_table:
+                mutations_by_table[table] = []
+                
+            cols_list = []
+            vals_list = []
+            for k, v in op["_params"].items():
+                cols_list.append(k)
+                if isinstance(v, dict):
+                    vals_list.append(spanner.JsonDict(v))
+                else:
+                    vals_list.append(v)
+                    
+            mutations_by_table[table].append({"cols": tuple(cols_list), "vals": vals_list})
 
-        # PASS 2: DML Construction
         for idx, op in enumerate(edge_merges):
             src_var, dst_var = op["src_var"], op["dst_var"]
             src_pk, dst_pk = op["src_pk"], op["dst_pk"]
@@ -554,25 +562,37 @@ class SpannerSessionWrapper:
             final_sql_params["src_id"] = final_src_val
             final_sql_params["dst_id"] = final_dst_val
             
-            cols, vals = [] , []
-            insert_params = {}
-            for c, v in final_sql_params.items():
+            if edge_label not in mutations_by_table:
+                mutations_by_table[edge_label] = []
+                
+            cols_list = []
+            vals_list = []
+            for k, v in final_sql_params.items():
+                cols_list.append(k)
                 if isinstance(v, dict):
-                    cols.append(c)
-                    vals.append(f"PARSE_JSON(@{c})")
-                    insert_params[c] = json.dumps(v)
+                    vals_list.append(spanner.JsonDict(v))
                 else:
-                    cols.append(c)
-                    vals.append(f"@{c}")
-                    insert_params[c] = v
-            
-            sql = f"INSERT OR UPDATE `{edge_label}` ({', '.join(cols)}) VALUES ({', '.join(vals)})"
-            batch_statements.append((sql, insert_params, get_ptypes(insert_params)))
+                    vals_list.append(v)
 
-        if batch_statements:
-            for i in range(0, len(batch_statements), 50):
-                chunk = batch_statements[i:i+50]
-                transaction.batch_update(chunk)
+            mutations_by_table[edge_label].append({"cols": tuple(cols_list), "vals": vals_list})
+            
+        # Group mutations by signature to use efficient transaction.insert_or_update
+        for table, items in mutations_by_table.items():
+            sigs = {}
+            for item in items:
+                sig = item["cols"]
+                if sig not in sigs:
+                    sigs[sig] = []
+                sigs[sig].append(item["vals"])
+            
+            for cols, values_list in sigs.items():
+                for i in range(0, len(values_list), 1000):
+                    chunk = values_list[i:i+1000]
+                    transaction.insert_or_update(
+                        table=table,
+                        columns=list(cols),
+                        values=chunk
+                    )
 
     def run_batch(self, batch_queries: list):
         """Executes a list of (query, parameters) tuples in a single Spanner transaction."""
@@ -751,21 +771,11 @@ class SpannerSessionWrapper:
                     if prop_v_param in parameters:
                         sql_params[prop_k] = parameters[prop_v_param]
                         
-                cols = []
-                vals = []
-                final_sql_params = {}
-                for c, v in sql_params.items():
-                    if isinstance(v, dict):
-                        cols.append(c)
-                        vals.append(f"PARSE_JSON(@{c})")
-                        final_sql_params[c] = json.dumps(v)
-                    else:
-                        cols.append(c)
-                        vals.append(f"@{c}")
-                        final_sql_params[c] = v
-                        
-                sql_query = f"INSERT OR UPDATE `{node_label}` ({', '.join(cols)}) VALUES ({', '.join(vals)})"
-                sql_ops.append((sql_query, final_sql_params))
+                sql_ops.append({
+                    "type": "node_merge",
+                    "table": node_label,
+                    "_params": sql_params
+                })
 
             # 1.5 Extract MATCH clauses to build subqueries for edge resolving if not provided in MERGE
             match_lookups = {}
