@@ -2042,8 +2042,7 @@ class GraphBuilder:
                     "path": file_uri,
                     "name": file_name,
                     "relative_path": relative_path,
-                    "is_dependency": is_dependency,
-                    "file_type": "source"
+                    "is_dependency": is_dependency
                 }
             })
 
