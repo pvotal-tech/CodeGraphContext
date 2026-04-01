@@ -138,8 +138,8 @@ class MCPServer:
     # --- Tool Wrappers ---
     # These methods delegate to the functional handlers, injecting the necessary dependencies.
 
-    def execute_cypher_query_tool(self, **args) -> Dict[str, Any]:
-        return query_handlers.execute_cypher_query(self.db_manager, **args)
+    def execute_gql_query_tool(self, **args) -> Dict[str, Any]:
+        return query_handlers.execute_gql_query(self.db_manager, **args)
     
     def visualize_graph_query_tool(self, **args) -> Dict[str, Any]:
         return query_handlers.visualize_graph_query(self.db_manager, **args)
@@ -224,7 +224,7 @@ class MCPServer:
             "find_code": self.find_code_tool,
             "analyze_code_relationships": self.analyze_code_relationships_tool,
             "watch_directory": self.watch_directory_tool,
-            "execute_cypher_query": self.execute_cypher_query_tool,
+            "execute_gql_query": self.execute_gql_query_tool,
             "add_code_to_graph": self.add_code_to_graph_tool,
             "check_job_status": self.check_job_status_tool,
             "list_jobs": self.list_jobs_tool,

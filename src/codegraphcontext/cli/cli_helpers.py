@@ -290,8 +290,8 @@ def delete_helper(repo_path: str):
         db_manager.close_driver()
 
 
-def cypher_helper(query: str):
-    """Executes a read-only Cypher query."""
+def gql_helper(query: str):
+    """Executes a read-only Spanner GQL query."""
     services = _initialize_services()
     if not all(services):
         return
@@ -316,9 +316,9 @@ def cypher_helper(query: str):
         db_manager.close_driver()
 
 
-def cypher_helper_visual(query: str):
-    """Executes a read-only Cypher query and visualizes the results."""
-    from .visualizer import visualize_cypher_results
+def gql_helper_visual(query: str):
+    """Executes a read-only Spanner GQL query and visualizes the results."""
+    from .visualizer import visualize_gql_results
     
     services = _initialize_services()
     if not all(services):
@@ -342,7 +342,7 @@ def cypher_helper_visual(query: str):
                 console.print("[yellow]No results to visualize.[/yellow]")
                 return  # finally block will close driver
             
-            visualize_cypher_results(records, query)
+            visualize_gql_results(records, query)
     except Exception as e:
         console.print(f"[bold red]An error occurred while executing query:[/bold red] {e}")
     finally:

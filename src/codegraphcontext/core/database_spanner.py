@@ -425,38 +425,6 @@ class SpannerSessionWrapper:
     def __exit__(self, exc_type, exc_val, exc_tb):
         return False
 
-    def _format_gql(self, query, parameters):
-        import re
-        gql_query = query
-        if not gql_query.strip().upper().startswith("GRAPH"):
-            gql_query = f"GRAPH {self.graph_name}\n{gql_query}"
-            
-        # Spanner GQL variables are @var instead of $var
-        gql_query = re.sub(r'\$(\w+)', r'@\1', gql_query)
-        
-        # Translate Cypher string matching operators to Spanner Google SQL equivalents
-        expr_pat = r'((?:\w+\([\w\.@\'"]+\))|[\w\.@\'"]+)'
-        gql_query = re.sub(rf'(?i){expr_pat}\s+CONTAINS\s+{expr_pat}', r'STRPOS(\1, \2) > 0', gql_query)
-        gql_query = re.sub(rf'(?i){expr_pat}\s+STARTS\s+WITH\s+{expr_pat}', r'STARTS_WITH(\1, \2)', gql_query)
-        gql_query = re.sub(rf'(?i){expr_pat}\s+ENDS\s+WITH\s+{expr_pat}', r'ENDS_WITH(\1, \2)', gql_query)
-        
-        # Translate Cypher functions
-        gql_query = re.sub(r'(?i)\btoLower\(', 'LOWER(', gql_query)
-        
-        # Wrap all node and edge labels in backticks to prevent reserved word collisions
-        gql_query = re.sub(r'\[([a-zA-Z0-9_]*):([a-zA-Z0-9_]+)', r'[\1:`\2`', gql_query)
-        gql_query = re.sub(r'\(([a-zA-Z0-9_]*):([a-zA-Z0-9_]+)', r'(\1:`\2`', gql_query)
-        
-        # Guard against nested dicts leaking into GQL execution engine
-        safe_parameters = {}
-        for k, v in parameters.items():
-            if isinstance(v, (dict, list)):
-                safe_parameters[k] = str(v)
-            else:
-                safe_parameters[k] = v
-
-        return gql_query, safe_parameters
-
     def _execute_translations(self, transaction, translations):
         import google.cloud.spanner as spanner
         from google.cloud.spanner_v1.data_types import JsonObject
@@ -636,7 +604,7 @@ class SpannerSessionWrapper:
                     )
 
     def run_batch(self, batch_queries: list):
-        """Executes a list of raw DICT payloads natively. Cypher strings are no longer supported in batching."""
+        """Executes a list of raw DICT payloads natively."""
         all_translations = []
         for item in batch_queries:
             if isinstance(item, tuple) and len(item) == 2:
@@ -670,8 +638,17 @@ class SpannerSessionWrapper:
         if "DETACH DELETE" in aliased_query.upper():
             return self._execute_cascade_delete(parameters)
 
-        # Pure GQL Execution
-        gql_query, safe_parameters = self._format_gql(aliased_query, parameters)
+        # 2. Prevent dicts/lists from crashing Spanner's single-type query engine
+        safe_parameters = {}
+        for k, v in parameters.items():
+            if isinstance(v, (dict, list)):
+                safe_parameters[k] = str(v)
+            else:
+                safe_parameters[k] = v
+
+        gql_query = aliased_query
+        if not gql_query.strip().upper().startswith("GRAPH"):
+            gql_query = f"GRAPH `{self.graph_name}`\n{gql_query}"
         
         try:
             with self.database.snapshot() as snapshot:
@@ -693,9 +670,8 @@ class SpannerSessionWrapper:
                 return SpannerResultWrapper([])
             if "google.api_core.exceptions" in str(type(e)):
                 # Abstract away Spanner syntax/validation errors to the original expected exception
-                from neo4j.exceptions import CypherSyntaxError
                 error_logger(f"Spanner GQL rejected syntax/properties: {query[:100]}... Error: {e}")
-                raise CypherSyntaxError(f"Backend rejected Cypher Query: {str(e)}")
+                raise ValueError(f"Backend rejected GQL Query: {str(e)}")
             error_logger(f"Spanner Query failed: {query[:100]}... Error: {e}")
             raise
 

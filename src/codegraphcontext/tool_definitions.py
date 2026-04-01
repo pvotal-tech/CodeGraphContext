@@ -58,13 +58,13 @@ TOOLS = {
             "required": ["path"]
         }
     },
-    "execute_cypher_query": {
-        "name": "execute_cypher_query",
-        "description": "Fallback tool to run a direct, read-only Cypher query against the code graph. Use this for complex questions not covered by other tools. The graph contains nodes representing code structures and relationships between them. **Schema Overview:**\n- **Nodes:** `Repository`, `File`, `Module`, `Class`, `Function`.\n- **Properties:** Nodes have properties like `name`, `path`, `cyclomatic_complexity` (on Function nodes), and `source`.\n- **Relationships:** `CONTAINS`, `CALLS`, `IMPORTS`, `INHERITS`.\n\nCRITICAL SPANNER RULE: You MUST explicitly use `AS` to alias any returned property or function call. E.g., `RETURN labels(n) AS labels, n.name AS name, n.path AS path`. Failure to alias will crash the Spanner GQL backend.",
+    "execute_gql_query": {
+        "name": "execute_gql_query",
+        "description": "Fallback tool to run a direct, read-only Spanner GQL query against the code graph. Use this for complex questions not covered by other tools. The graph contains nodes representing code structures and relationships between them. **Schema Overview:**\n- **Nodes:** `Repository`, `File`, `Module`, `Class`, `Function`.\n- **Properties:** Nodes have properties like `name`, `path`, `cyclomatic_complexity` (on Function nodes), and `source`.\n- **Relationships:** `CONTAINS`, `CALLS`, `IMPORTS`, `INHERITS`.\n\nCRITICAL SPANNER RULE: You MUST explicitly use `AS` to alias any returned property or function call. E.g., `RETURN labels(n) AS labels, n.name AS name, n.path AS path`. Failure to alias will crash the Spanner GQL backend.",
         "inputSchema": {
             "type": "object",
-            "properties": { "cypher_query": {"type": "string", "description": "The read-only Cypher query to execute."} },
-            "required": ["cypher_query"]
+            "properties": { "gql_query": {"type": "string", "description": "The read-only Spanner GQL query to execute."} },
+            "required": ["gql_query"]
         }
     },
     "add_package_to_graph": {
@@ -136,13 +136,13 @@ TOOLS = {
     },
     "visualize_graph_query": {
         "name": "visualize_graph_query",
-        "description": "Generates a URL to visualize the results of a Cypher query in the Neo4j Browser. The user can open this URL in their web browser to see the graph visualization.",
+        "description": "Generates a URL to visualize the results of a GQL query in the local Spanner Playground UI. The user can open this URL in their web browser to see the graph visualization.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "cypher_query": {"type": "string", "description": "The Cypher query to visualize."}
+                "gql_query": {"type": "string", "description": "The Spanner GQL query to visualize."}
             },
-            "required": ["cypher_query"]
+            "required": ["gql_query"]
         }
     },
     "list_watched_paths": {

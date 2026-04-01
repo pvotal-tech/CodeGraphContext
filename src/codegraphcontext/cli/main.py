@@ -32,8 +32,8 @@ from .cli_helpers import (
     add_package_helper,
     list_repos_helper,
     delete_helper,
-    cypher_helper,
-    cypher_helper_visual,
+    gql_helper,
+    gql_helper_visual,
     visualize_helper,
     reindex_helper,
     clean_helper,
@@ -2107,17 +2107,17 @@ def analyze_variable_usage(
 
 
 # ============================================================================
-# QUERY COMMAND - Raw Cypher Queries
+# QUERY COMMAND - Raw Spanner GQL Queries
 # ============================================================================
 
 @app.command("query")
 def query_graph(
     ctx: typer.Context,
-    query: str = typer.Argument(..., help="Cypher query to execute (read-only)"),
+    query: str = typer.Argument(..., help="Spanner GQL query to execute (read-only)"),
     visual: bool = typer.Option(False, "--visual", "--viz", "-V", help="Show results as interactive graph visualization")
 ):
     """
-    Execute a custom Cypher query on the code graph.
+    Execute a custom Spanner GQL query on the code graph.
     
     Examples:
         cgc query "MATCH (f:Function) RETURN f.name LIMIT 10"
@@ -2128,16 +2128,16 @@ def query_graph(
     
     # Check if visual mode is enabled
     if check_visual_flag(ctx, visual):
-        cypher_helper_visual(query)
+        gql_helper_visual(query)
     else:
-        cypher_helper(query)
+        gql_helper(query)
 
 # Keep old 'cypher' as alias for backward compatibility
-@app.command("cypher", hidden=True)
-def cypher_legacy(query: str = typer.Argument(..., help="The read-only Cypher query to execute.")):
+@app.command("gql", hidden=True)
+def gql_legacy(query: str = typer.Argument(..., help="The read-only Spanner GQL query to execute.")):
     """[Deprecated] Use 'cgc query' instead."""
-    console.print("[yellow]⚠️  'cgc cypher' is deprecated. Use 'cgc query' instead.[/yellow]")
-    cypher_helper(query)
+    console.print("[yellow]⚠️  'cgc gql' is deprecated. Use 'cgc query' instead.[/yellow]")
+    gql_helper(query)
 
 
 

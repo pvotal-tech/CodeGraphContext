@@ -5,29 +5,31 @@ from pathlib import Path
 import os
 from datetime import datetime
 from typing import Any, Dict
-from neo4j.exceptions import CypherSyntaxError
 from ...utils.debug_log import debug_log
 
-def execute_cypher_query(db_manager, **args) -> Dict[str, Any]:
+def execute_gql_query(db_manager, **args) -> Dict[str, Any]:
     """
-    Tool implementation for executing a read-only Cypher query.
+    Tool implementation for executing a read-only Spanner GQL query.
     
     Important: Includes a safety check to prevent any database modification
     by disallowing keywords like CREATE, MERGE, DELETE, etc.
     """
-    cypher_query = args.get("cypher_query")
-    if not cypher_query:
-        return {"error": "Cypher query cannot be empty."}
+    gql_query = args.get("gql_query")
+    if not gql_query:
+        # Fallback if the old name is passed
+        gql_query = args.get("gql_query")
+    if not gql_query:
+        return {"error": "GQL query cannot be empty."}
 
     # Safety Check: Prevent any write operations to the database.
     # This check first removes all string literals and then checks for forbidden keywords.
-    forbidden_keywords = ['CREATE', 'MERGE', 'DELETE', 'SET', 'REMOVE', 'DROP', 'CALL apoc']
+    forbidden_keywords = ['CREATE', 'MERGE', 'DELETE', 'SET', 'REMOVE', 'DROP', 'CALL apoc', 'INSERT', 'UPDATE']
     
     # Regex to match single or double quoted strings, handling escaped quotes.
     string_literal_pattern = r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\''
     
     # Remove all string literals from the query.
-    query_without_strings = re.sub(string_literal_pattern, '', cypher_query)
+    query_without_strings = re.sub(string_literal_pattern, '', gql_query)
     
     # Now, check for forbidden keywords in the query without strings.
     for keyword in forbidden_keywords:
@@ -37,32 +39,25 @@ def execute_cypher_query(db_manager, **args) -> Dict[str, Any]:
             }
 
     try:
-        debug_log(f"Executing Cypher query: {cypher_query}")
+        debug_log(f"Executing GQL query: {gql_query}")
         with db_manager.get_driver().session() as session:
-            result = session.run(cypher_query)
+            result = session.run(gql_query)
             # Convert results to a list of dictionaries for clean JSON serialization.
             records = [record.data() for record in result]
             
             return {
                 "success": True,
-                "query": cypher_query,
+                "query": gql_query,
                 "record_count": len(records),
                 "results": records
             }
     
-    except CypherSyntaxError as e:
-        debug_log(f"Cypher syntax error: {str(e)}")
-        return {
-            "error": "Cypher syntax error.",
-            "details": str(e),
-            "query": cypher_query
-        }
     except Exception as e:
         import traceback
         import sys
-        print(f"ERROR EXECUTING CYPHER: {cypher_query}", file=sys.stderr)
+        print(f"ERROR EXECUTING GQL: {gql_query}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
-        debug_log(f"Error executing Cypher query: {str(e)}")
+        debug_log(f"Error executing Spanner GQL query: {str(e)}")
         return {
             "error": f"An unexpected error occurred while executing the query: {str(e)}",
             "details": traceback.format_exc()
@@ -70,16 +65,16 @@ def execute_cypher_query(db_manager, **args) -> Dict[str, Any]:
 
 def visualize_graph_query(db_manager, **args) -> Dict[str, Any]:
     """Tool to generate a visualization URL for the local Playground UI."""
-    cypher_query = args.get("cypher_query")
-    if not cypher_query:
+    gql_query = args.get("gql_query")
+    if not gql_query:
         return {"error": "Cypher query cannot be empty."}
 
     try:
         # We point to the local server started by 'cgc visualize'
         # By default it runs on port 8000
         port = 8000
-        encoded_query = urllib.parse.quote(cypher_query)
-        visualization_url = f"http://localhost:{port}/index.html?cypher_query={encoded_query}"
+        encoded_query = urllib.parse.quote(gql_query)
+        visualization_url = f"http://localhost:{port}/index.html?gql_query={encoded_query}"
         
         return {
             "success": True,

@@ -32,7 +32,7 @@ def set_db_manager(manager: DatabaseManager):
     db_manager = manager
 
 @app.get("/api/graph")
-async def get_graph(repo_path: Optional[str] = None, cypher_query: Optional[str] = None):
+async def get_graph(repo_path: Optional[str] = None, gql_query: Optional[str] = None):
     if not db_manager:
         raise HTTPException(status_code=500, detail="Database not initialized")
     
@@ -75,9 +75,9 @@ async def get_graph(repo_path: Optional[str] = None, cypher_query: Optional[str]
         print(f"DEBUG: Starting get_graph with repo_path={repo_path}", flush=True)
 
         with db_manager.get_driver().session() as session:
-            if cypher_query:
-                print(f"DEBUG: Executing custom query: {cypher_query}", flush=True)
-                result = session.run(cypher_query)
+            if gql_query:
+                print(f"DEBUG: Executing custom query: {gql_query}", flush=True)
+                result = session.run(gql_query)
             elif repo_path:
                 repo_path = str(Path(repo_path).resolve())
                 print(f"DEBUG: Fetching subgraph for: {repo_path}", flush=True)

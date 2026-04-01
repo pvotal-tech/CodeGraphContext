@@ -1,6 +1,6 @@
 class CppToolkit:
     """Handles Neo4j queries for C++ file graph."""
-    def get_cypher_query(query: str) -> str:
+    def get_gql_query(query: str) -> str:
         """
         Returns a Cypher query string based on the query type requested.
 

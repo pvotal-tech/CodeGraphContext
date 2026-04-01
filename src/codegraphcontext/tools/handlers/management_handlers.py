@@ -266,7 +266,7 @@ def get_repository_stats(code_finder: CodeFinder, **args) -> Dict[str, Any]:
                 
                 # Check if repository exists
                 repo_query = """
-                MATCH (r:Repository {path: $path})
+                MATCH (r:Repository {path: @path})
                 RETURN r
                 """
                 result = session.run(repo_query, path=repo_path_obj)
@@ -277,19 +277,19 @@ def get_repository_stats(code_finder: CodeFinder, **args) -> Dict[str, Any]:
                     }
                 
                 # 1. Files
-                file_query = "MATCH (r:Repository {path: $path})-[:CONTAINS*]->(f:File) RETURN count(f) as c"
+                file_query = "MATCH (r:Repository {path: @path})-[:CONTAINS*]->(f:File) RETURN count(f) as c"
                 file_count = session.run(file_query, path=repo_path_obj).single()["c"]
                 
                 # 2. Functions
-                func_query = "MATCH (r:Repository {path: $path})-[:CONTAINS*]->(func:Function) RETURN count(func) as c"
+                func_query = "MATCH (r:Repository {path: @path})-[:CONTAINS*]->(func:Function) RETURN count(func) as c"
                 func_count = session.run(func_query, path=repo_path_obj).single()["c"]
                 
                 # 3. Classes
-                class_query = "MATCH (r:Repository {path: $path})-[:CONTAINS*]->(cls:Class) RETURN count(cls) as c"
+                class_query = "MATCH (r:Repository {path: @path})-[:CONTAINS*]->(cls:Class) RETURN count(cls) as c"
                 class_count = session.run(class_query, path=repo_path_obj).single()["c"]
                 
                 # 4. Modules (imported)
-                module_query = "MATCH (r:Repository {path: $path})-[:CONTAINS*]->(f:File)-[:IMPORTS]->(m:Module) RETURN count(DISTINCT m) as c"
+                module_query = "MATCH (r:Repository {path: @path})-[:CONTAINS*]->(f:File)-[:IMPORTS]->(m:Module) RETURN count(DISTINCT m) as c"
                 module_count = session.run(module_query, path=repo_path_obj).single()["c"]
                 
                 return {

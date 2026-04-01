@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 class Advanced_language_query:
     """
-    Tool implementation for executing a read-only language specific Cypher query.
+    Tool implementation for executing a read-only language specific Spanner GQL query.
     
     Important: Includes a safety check to prevent any database modification
     by disallowing keywords like CREATE, MERGE, DELETE, etc.
@@ -77,22 +77,22 @@ class Advanced_language_query:
         self.toolkit = self.TOOLKITS[language]()
 
         # Getting the language query
-        cypher_query = self.toolkit.get_cypher_query(label)
+        gql_query = self.toolkit.get_gql_query(label)
         try:
-            debug_log(f"Executing Cypher query: {cypher_query}")
+            debug_log(f"Executing Spanner GQL query: {gql_query}")
             with self.db_manager.get_driver().session() as session:
-                result = session.run(cypher_query)
+                result = session.run(gql_query)
                 # Convert results to a list of dictionaries for clean JSON serialization
                 records = [record.data() for record in result]
 
                 return {
                     "success": True, 
                     "language": language,
-                    "query": cypher_query,
+                    "query": gql_query,
                     "results": records 
                 }
         except Exception as e:
-            debug_log(f"Error executing Cypher query: {str(e)}")
+            debug_log(f"Error executing Spanner GQL query: {str(e)}")
             return {
                 "error": "An unexpected error occurred while executing the query.",
                 "details": str(e)

@@ -4,7 +4,7 @@ from dataclasses import asdict
 from typing import Any, Dict
 from datetime import datetime, timedelta
 
-from neo4j.exceptions import CypherSyntaxError
+
 
 from ..core.database_spanner import SpannerDBManager as DatabaseManager
 from ..core.jobs import JobManager, JobStatus
@@ -76,29 +76,27 @@ class SystemTools:
         except Exception as e:
             return {"error": f"Failed to list jobs: {str(e)}"}
 
-    def execute_cypher_query_tool(self, cypher_query: str) -> Dict[str, Any]:
-        """Tool to execute a read-only Cypher query."""
-        if not cypher_query:
-            return {"error": "Cypher query cannot be empty."}
+    def execute_gql_query_tool(self, gql_query: str) -> Dict[str, Any]:
+        """Tool to execute a read-only Spanner GQL query."""
+        if not gql_query:
+            return {"error": "GQL query cannot be empty."}
 
-        forbidden_keywords = ['CREATE', 'MERGE', 'DELETE', 'SET', 'REMOVE', 'DROP', 'CALL apoc']
-        if any(keyword in cypher_query.upper() for keyword in forbidden_keywords):
+        forbidden_keywords = ['CREATE', 'MERGE', 'DELETE', 'SET', 'REMOVE', 'DROP', 'CALL apoc', 'INSERT', 'UPDATE']
+        if any(keyword in gql_query.upper() for keyword in forbidden_keywords):
             return {"error": "This tool only supports read-only queries."}
 
         try:
             with self.db_manager.get_driver().session() as session:
-                result = session.run(cypher_query)
+                result = session.run(gql_query)
                 records = [record.data() for record in result]
                 return {
                     "success": True,
-                    "query": cypher_query,
+                    "query": gql_query,
                     "record_count": len(records),
                     "results": records
                 }
-        except CypherSyntaxError as e:
-            return {"error": "Cypher syntax error.", "details": str(e)}
         except Exception as e:
-            return {"error": "An unexpected error occurred.", "details": str(e)}
+            return {"error": "An unexpected error occurred executing the Spanner GQL query.", "details": str(e)}
 
     def find_dead_code_tool(self) -> Dict[str, Any]:
         """Finds potentially unused functions (dead code)."""
@@ -108,8 +106,8 @@ class SystemTools:
                 result = session.run("""
                     MATCH (func:Function)
                     WHERE func.is_dependency = false
-                      AND NOT func.name STARTS WITH '_'
-                      AND NOT func.name IN ['main', 'setup', 'run']
+                      AND NOT STARTS_WITH(func.name, '_')
+                      AND func.name NOT IN UNNEST(['main', 'setup', 'run'])
                     OPTIONAL MATCH (caller:Function)-[:CALLS]->(func)
                     WHERE caller.is_dependency = false
                     WITH func, count(caller) as caller_count
