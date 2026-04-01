@@ -18,7 +18,7 @@ class CodeFinder:
 
     def format_query(self, find_by: Literal["Class", "Function"], fuzzy_search:bool, repo_path: Optional[str] = None) -> str:
         """Format the search query based on the search type and fuzzy search settings."""
-        repo_filter = "AND node.path STARTS_WITH @repo_path" if repo_path else ""
+        repo_filter = "AND STARTS_WITH(node.path, @repo_path)" if repo_path else ""
         return f"""
             MATCH (node:{find_by})
             WHERE STRPOS(LOWER(node.name), LOWER(@search_term)) > 0 {repo_filter}
@@ -97,7 +97,7 @@ class CodeFinder:
         """Find code by content matching in source or docstrings."""
         all_results = []
         with self.driver.session() as session:
-            repo_filter = "AND node.path STARTS_WITH @repo_path" if repo_path else ""
+            repo_filter = "AND STARTS_WITH(node.path, @repo_path)" if repo_path else ""
             for label, type_name in [('Function', 'function'), ('Class', 'class')]:
                 try:
                     result = session.run(f"""

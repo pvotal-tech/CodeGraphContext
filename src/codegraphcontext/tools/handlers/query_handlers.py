@@ -56,11 +56,11 @@ def execute_gql_query(db_manager, **args) -> Dict[str, Any]:
         import traceback
         import sys
         print(f"ERROR EXECUTING GQL: {gql_query}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
         debug_log(f"Error executing Spanner GQL query: {str(e)}")
         return {
-            "error": f"An unexpected error occurred while executing the query: {str(e)}",
-            "details": traceback.format_exc()
+            "success": False,
+            "error_message": f"Query Failed with Syntax/Execution Error: {str(e)}. Please correct your GQL syntax and try again.",
+            "suggestion": "Review GQL semantics. E.g. did you enclose `CONTAINS` in backticks? Did you use the STARTS_WITH() function? Check aliases."
         }
 
 def visualize_graph_query(db_manager, **args) -> Dict[str, Any]:
