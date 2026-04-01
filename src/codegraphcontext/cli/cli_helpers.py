@@ -165,7 +165,7 @@ def index_helper(path: str):
         try:
             with db_manager.get_driver().session() as session:
                 result = session.run(
-                    "MATCH (r:Repository {path: @path})-[:CONTAINS]->(f:File) RETURN count(f) as file_count",
+                    "MATCH (r:Repository {path: @path})-[:`CONTAINS`]->(f:File) RETURN count(f) as file_count",
                     path=str(path_obj)
                 )
                 record = result.single()
@@ -588,20 +588,20 @@ def stats_helper(path: str = None):
                 # Get stats
                 # Get stats using separate queries to handle depth and avoid Cartesian products
                 # 1. Files
-                file_query = "MATCH (r:Repository {path: @path})-[:CONTAINS*]->(f:File) RETURN count(f) as c"
+                file_query = "MATCH (r:Repository {path: @path})-[:`CONTAINS`]->{1, 15}(f:File) RETURN count(f) as c"
                 file_count = session.run(file_query, path=str(path_obj)).single()["c"]
                 
                 # 2. Functions (including methods in classes)
-                func_query = "MATCH (r:Repository {path: @path})-[:CONTAINS*]->(func:Function) RETURN count(func) as c"
+                func_query = "MATCH (r:Repository {path: @path})-[:`CONTAINS`]->{1, 15}(func:Function) RETURN count(func) as c"
                 func_count = session.run(func_query, path=str(path_obj)).single()["c"]
                 
                 # 3. Classes
-                class_query = "MATCH (r:Repository {path: @path})-[:CONTAINS*]->(c:Class) RETURN count(c) as c"
+                class_query = "MATCH (r:Repository {path: @path})-[:`CONTAINS`]->{1, 15}(c:Class) RETURN count(c) as c"
                 class_count = session.run(class_query, path=str(path_obj)).single()["c"]
                 
                 # 4. Modules (imported) - Note: Module nodes are outside the repo structure usually, connected via IMPORTS
                 # We need to traverse from files to modules
-                module_query = "MATCH (r:Repository {path: @path})-[:CONTAINS*]->(f:File)-[:IMPORTS]->(m:Module) RETURN count(DISTINCT m) as c"
+                module_query = "MATCH (r:Repository {path: @path})-[:`CONTAINS`]->{1, 15}(f:File)-[:IMPORTS]->(m:Module) RETURN count(DISTINCT m) as c"
                 module_count = session.run(module_query, path=str(path_obj)).single()["c"]
 
                 table = Table(show_header=True, header_style="bold magenta")

@@ -1307,7 +1307,7 @@ class GraphBuilder:
         with self.driver.session() as session:
             try:
                 parents_res = session.run("""
-                    MATCH (f:File {path: @path})<-[:CONTAINS*]-(d:Directory)
+                    MATCH (f:File {path: @path})<-[:`CONTAINS`]{1,15}]-(d:Directory)
                     RETURN d.path as path ORDER BY d.path DESC
                 """, path=file_path_str)
                 parent_paths = [record["path"] for record in parents_res]
@@ -1331,7 +1331,7 @@ class GraphBuilder:
             session.run(
                 """
                 MATCH (f:File {path: @path})
-                OPTIONAL MATCH (f)-[:CONTAINS]->(element)
+                OPTIONAL MATCH (f)-[:`CONTAINS`]->(element)
                 DETACH DELETE f, element
                 """,
                 path=file_path_str,
@@ -1341,7 +1341,7 @@ class GraphBuilder:
             for path in parent_paths:
                 session.run("""
                     MATCH (d:Directory {path: @path})
-                    WHERE NOT (d)-[:CONTAINS]->()
+                    WHERE NOT (d)-[:`CONTAINS`]->()
                     DETACH DELETE d
                 """, path=path)
 
@@ -1363,7 +1363,7 @@ class GraphBuilder:
                 return False
 
             session.run("""MATCH (r:Repository {path: @path})
-                          OPTIONAL MATCH (r)-[:CONTAINS*]->(e)
+                          OPTIONAL MATCH (r)-[:`CONTAINS`]->{1, 15}(e)
                           DETACH DELETE r, e""", path=repo_path_str)
             info_logger(f"Deleted repository and its contents from graph: {repo_path_str}")
             return True

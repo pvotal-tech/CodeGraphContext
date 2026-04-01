@@ -252,7 +252,7 @@ class CodeFinder:
                 result = session.run(f"""
                     MATCH (caller)-[call:CALLS]->(target:Function {{name: @function_name, path: @path}})
                     WHERE (caller:Function OR caller:Class OR caller:File) {repo_filter}
-                    OPTIONAL MATCH (caller_file:File)-[:CONTAINS]->(caller)
+                    OPTIONAL MATCH (caller_file:File)-[:`CONTAINS`]->(caller)
                     RETURN DISTINCT
                         caller.name as caller_function,
                         COALESCE(caller.path, caller_file.path) as caller_file_path,
@@ -272,7 +272,7 @@ class CodeFinder:
                     result = session.run(f"""
                         MATCH (caller)-[call:CALLS]->(target:Function {{name: @function_name}})
                         WHERE (caller:Function OR caller:Class OR caller:File) {repo_filter}
-                        OPTIONAL MATCH (caller_file:File)-[:CONTAINS]->(caller)
+                        OPTIONAL MATCH (caller_file:File)-[:`CONTAINS`]->(caller)
                         RETURN DISTINCT
                             caller.name as caller_function,
                             COALESCE(caller.path, caller_file.path) as caller_file_path,
@@ -291,7 +291,7 @@ class CodeFinder:
                 result = session.run(f"""
                     MATCH (caller:Function)-[call:CALLS]->(target:Function {{name: @function_name}})
                     WHERE 1=1 {repo_filter}
-                    OPTIONAL MATCH (caller_file:File)-[:CONTAINS]->(caller)
+                    OPTIONAL MATCH (caller_file:File)-[:`CONTAINS`]->(caller)
                     RETURN DISTINCT
                         caller.name as caller_function,
                         caller.path as caller_file_path,
@@ -319,7 +319,7 @@ class CodeFinder:
                     MATCH (caller:Function {{name: @function_name, path: @absolute_file_path}})
                     MATCH (caller)-[call:CALLS]->(called:Function)
                     WHERE STARTS_WITH(called.path, @repo_path) OR @repo_path IS NULL
-                    OPTIONAL MATCH (called_file:File)-[:CONTAINS]->(called)
+                    OPTIONAL MATCH (called_file:File)-[:`CONTAINS`]->(called)
                     RETURN DISTINCT
                         called.name as called_function,
                         called.path as called_file_path,
@@ -336,7 +336,7 @@ class CodeFinder:
                 result = session.run(f"""
                     MATCH (caller:Function {{name: @function_name}})-[call:CALLS]->(called:Function)
                     WHERE STARTS_WITH(called.path, @repo_path) OR @repo_path IS NULL
-                    OPTIONAL MATCH (called_file:File)-[:CONTAINS]->(called)
+                    OPTIONAL MATCH (called_file:File)-[:`CONTAINS`]->(called)
                     RETURN DISTINCT
                         called.name as called_function,
                         called.path as called_file_path,
@@ -359,7 +359,7 @@ class CodeFinder:
             result = session.run(f"""
                 MATCH (file:File)-[imp:IMPORTS]->(module:Module)
                 WHERE (module.name = @module_name OR STRPOS(LOWER(module.full_import_name), LOWER(@module_name)) > 0) {repo_filter}
-                OPTIONAL MATCH (repo:Repository)-[:CONTAINS]->(file)
+                OPTIONAL MATCH (repo:Repository)-[:`CONTAINS`]->(file)
                 WITH file, repo, COLLECT({{
                     imported_module: module.name,
                     import_alias: module.alias,
@@ -384,9 +384,9 @@ class CodeFinder:
             repo_filter = "AND STARTS_WITH(container.path, @repo_path)" if repo_path else ""
             result = session.run(f"""
                 MATCH (var:Variable {{name: @variable_name}})
-                MATCH (container)-[:CONTAINS]->(var)
+                MATCH (container)-[:`CONTAINS`]->(var)
                 WHERE (container:Function OR container:Class OR container:File) {repo_filter}
-                OPTIONAL MATCH (file:File)-[:CONTAINS]->(container)
+                OPTIONAL MATCH (file:File)-[:`CONTAINS`]->(container)
                 RETURN DISTINCT
                     CASE 
                         WHEN container:Function THEN container.name
@@ -423,7 +423,7 @@ class CodeFinder:
                 {match_clause}
                 MATCH (child)-[:INHERITS]->(parent:Class)
                 WHERE 1=1 {repo_filter}
-                OPTIONAL MATCH (parent_file:File)-[:CONTAINS]->(parent)
+                OPTIONAL MATCH (parent_file:File)-[:`CONTAINS`]->(parent)
                 RETURN DISTINCT
                     parent.name as parent_class,
                     parent.path as parent_file_path,
@@ -439,7 +439,7 @@ class CodeFinder:
                 {match_clause}
                 MATCH (grandchild:Class)-[:INHERITS]->(child)
                 WHERE 1=1 {repo_filter_child}
-                OPTIONAL MATCH (child_file:File)-[:CONTAINS]->(grandchild)
+                OPTIONAL MATCH (child_file:File)-[:`CONTAINS`]->(grandchild)
                 RETURN DISTINCT
                     grandchild.name as child_class,
                     grandchild.path as child_file_path,
@@ -453,7 +453,7 @@ class CodeFinder:
             repo_filter_method = "WHERE STARTS_WITH(method.path, @repo_path)" if repo_path else ""
             methods_query = f"""
                 {match_clause}
-                MATCH (child)-[:CONTAINS]->(method:Function)
+                MATCH (child)-[:`CONTAINS`]->(method:Function)
                 {repo_filter_method}
                 RETURN DISTINCT
                     method.name as method_name,
@@ -478,9 +478,9 @@ class CodeFinder:
         with self.driver.session() as session:
             repo_filter = "AND STARTS_WITH(class.path, @repo_path)" if repo_path else ""
             result = session.run(f"""
-                MATCH (class:Class)-[:CONTAINS]->(func:Function {{name: @function_name}})
+                MATCH (class:Class)-[:`CONTAINS`]->(func:Function {{name: @function_name}})
                 WHERE 1=1 {repo_filter}
-                OPTIONAL MATCH (file:File)-[:CONTAINS]->(class)
+                OPTIONAL MATCH (file:File)-[:`CONTAINS`]->(class)
                 RETURN DISTINCT
                     class.name as class_name,
                     class.path as class_file_path,
@@ -524,7 +524,7 @@ class CodeFinder:
                 WHERE caller.is_dependency = false {caller_ignore}
                 WITH func, count(caller) as caller_count
                 WHERE caller_count = 0
-                OPTIONAL MATCH (file:File)-[:CONTAINS]->(func)
+                OPTIONAL MATCH (file:File)-[:`CONTAINS`]->(func)
                 RETURN
                     func.name as function_name,
                     func.path as path,
@@ -753,7 +753,7 @@ class CodeFinder:
             importers_result = session.run(f"""
                 MATCH (file:File)-[imp:IMPORTS]->(module:Module {{name: @module_name}})
                 WHERE 1=1 {repo_filter}
-                OPTIONAL MATCH (repo:Repository)-[:CONTAINS]->(file)
+                OPTIONAL MATCH (repo:Repository)-[:`CONTAINS`]->(file)
                 RETURN DISTINCT
                     file.path as importer_file_path,
                     imp.line_number as import_line_number,
@@ -790,9 +790,9 @@ class CodeFinder:
                 variable_instances = session.run(f"""
                     MATCH (var:Variable {{name: @variable_name}})
                     WHERE (ENDS_WITH(var.path, @path) OR var.path = @path) {repo_filter}
-                    OPTIONAL MATCH (container)-[:CONTAINS]->(var)
+                    OPTIONAL MATCH (container)-[:`CONTAINS`]->(var)
                     WHERE container:Function OR container:Class OR container:File
-                    OPTIONAL MATCH (file:File)-[:CONTAINS]->(var)
+                    OPTIONAL MATCH (file:File)-[:`CONTAINS`]->(var)
                     RETURN DISTINCT
                         var.name as variable_name,
                         var.value as variable_value,
@@ -816,9 +816,9 @@ class CodeFinder:
                 variable_instances = session.run(f"""
                     MATCH (var:Variable {{name: @variable_name}})
                     WHERE 1=1 {repo_filter}
-                    OPTIONAL MATCH (container)-[:CONTAINS]->(var)
+                    OPTIONAL MATCH (container)-[:`CONTAINS`]->(var)
                     WHERE container:Function OR container:Class OR container:File
-                    OPTIONAL MATCH (file:File)-[:CONTAINS]->(var)
+                    OPTIONAL MATCH (file:File)-[:`CONTAINS`]->(var)
                     RETURN DISTINCT
                         var.name as variable_name,
                         var.value as variable_value,

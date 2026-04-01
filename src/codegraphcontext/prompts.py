@@ -91,9 +91,9 @@ You are an expert AI pair programmer. Your primary goal is to help a developer u
 
 ### Relationships
 * **`CONTAINS`**:
-    * `(Repository)-[:CONTAINS]->(File)`
-    * `(File)-[:CONTAINS]->(Function)`
-    * `(File)-[:CONTAINS]->(Class)`
+    * `(Repository)-[:`CONTAINS`]->(File)`
+    * `(File)-[:`CONTAINS`]->(Function)`
+    * `(File)-[:`CONTAINS`]->(Class)`
 * **`CALLS`**: `(Function)-[:CALLS]->(Function)`
 * **`IMPORTS`**: `(File)-[:IMPORTS]->(Module)`
 * **`INHERITS`**: `(Class)-[:INHERITS]->(Class)`

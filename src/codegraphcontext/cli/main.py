@@ -2121,7 +2121,7 @@ def query_graph(
     
     Examples:
         cgc query "MATCH (f:Function) RETURN f.name LIMIT 10"
-        cgc query "MATCH (c:Class)-[:CONTAINS]->(m) RETURN c.name, count(m)"
+        cgc query "MATCH (c:Class)-[:`CONTAINS`]->(m) RETURN c.name, count(m)"
         cgc query "MATCH (n)-[r]->(m) RETURN n,r,m LIMIT 50" --visual
     """
     _load_credentials()
