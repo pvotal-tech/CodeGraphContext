@@ -31,8 +31,8 @@ def cypher_path_not_under_ignore_dirs(path_var: str, ignore_dir_names: Optional[
     parts: List[str] = []
     for d in names:
         esc = d.replace("\\", "\\\\").replace("'", "\\'")
-        parts.append(f"{path_var} CONTAINS '/{esc}/'")
-        parts.append(f"{path_var} CONTAINS '\\\\{esc}\\\\'")
+        parts.append(f"STRPOS({path_var}, '/{esc}/') > 0")
+        parts.append(f"STRPOS({path_var}, '\\\\{esc}\\\\') > 0")
     return " AND NOT (" + " OR ".join(parts) + ")"
 
 

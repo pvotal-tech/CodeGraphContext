@@ -1305,28 +1305,21 @@ class GraphBuilder:
         """Deletes a file and all its contained elements and relationships."""
         file_path_str = file_uri
         with self.driver.session() as session:
-            try:
-                parents_res = session.run("""
-                    MATCH (f:File {path: @path})<-[:`CONTAINS`]{1,15}]-(d:Directory)
-                    RETURN d.path as path ORDER BY d.path DESC
-                """, path=file_path_str)
-                parent_paths = [record["path"] for record in parents_res]
-            except Exception:
-                # Fallback for Spanner and backends that do not support variable-length paths
-                parent_paths = []
-                if "$" in file_path_str:
-                    repo_uri, relative_path = file_path_str.split("$", 1)
-                    parts = __import__('pathlib').Path(relative_path).parts[:-1]
-                    current_parent = repo_uri
-                    parent_label = 'Repository'
-                    for part in parts:
-                        if parent_label == 'Repository':
-                            current_path_str = f"{current_parent}${part}"
-                        else:
-                            current_path_str = f"{current_parent}/{part}"
-                        parent_paths.insert(0, current_path_str)
-                        current_parent = current_path_str
-                        parent_label = 'Directory'
+            # Fallback for Spanner and backends that do not support variable-length paths
+            parent_paths = []
+            if "$" in file_path_str:
+                repo_uri, relative_path = file_path_str.split("$", 1)
+                parts = __import__('pathlib').Path(relative_path).parts[:-1]
+                current_parent = repo_uri
+                parent_label = 'Repository'
+                for part in parts:
+                    if parent_label == 'Repository':
+                        current_path_str = f"{current_parent}${part}"
+                    else:
+                        current_path_str = f"{current_parent}/{part}"
+                    parent_paths.insert(0, current_path_str)
+                    current_parent = current_path_str
+                    parent_label = 'Directory'
 
             session.run(
                 """
@@ -1362,9 +1355,9 @@ class GraphBuilder:
                 warning_logger(f"Attempted to delete non-existent repository: {repo_path_str}")
                 return False
 
-            session.run("""MATCH (r:Repository {path: @path})
-                          OPTIONAL MATCH (r)-[:`CONTAINS`]->{1, 15}(e)
-                          DETACH DELETE r, e""", path=repo_path_str)
+            session.run("""MATCH (e)
+                          WHERE e.path = @path OR STARTS_WITH(e.path, @path)
+                          DETACH DELETE e""", path=repo_path_str)
             info_logger(f"Deleted repository and its contents from graph: {repo_path_str}")
             return True
 

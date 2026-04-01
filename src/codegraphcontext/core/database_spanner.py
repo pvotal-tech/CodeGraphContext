@@ -153,6 +153,10 @@ class SpannerDBManager:
                 dst_id STRING(MAX) NOT NULL{table_info['properties']}
             ) PRIMARY KEY (id)
             """)
+            
+            # Create bidirectional graph traversal indices
+            ddl_statements.append(f"CREATE INDEX IF NOT EXISTS idx_{edge_table.lower()}_src ON `{edge_table}`(src_id) STORING (dst_id)")
+            ddl_statements.append(f"CREATE INDEX IF NOT EXISTS idx_{edge_table.lower()}_dst ON `{edge_table}`(dst_id) STORING (src_id)")
 
         # 3. Create Property Graph
         # Spanner limits CREATE PROPERTY GRAPH to full replacement or initial creation, no IF NOT EXISTS.
@@ -646,9 +650,12 @@ class SpannerSessionWrapper:
             else:
                 safe_parameters[k] = v
 
-        gql_query = aliased_query
-        if not gql_query.strip().upper().startswith("GRAPH"):
-            gql_query = f"GRAPH `{self.graph_name}`\n{gql_query}"
+        if aliased_query.strip().upper().startswith("SELECT"):
+            gql_query = aliased_query
+        else:
+            gql_query = aliased_query
+            if not gql_query.strip().upper().startswith("GRAPH"):
+                gql_query = f"GRAPH `{self.graph_name}`\n{gql_query}"
         
         try:
             with self.database.snapshot() as snapshot:

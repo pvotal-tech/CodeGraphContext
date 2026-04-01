@@ -30,7 +30,7 @@ class CodeFinder:
         return f"""
             CALL db.index.fulltext.queryNodes("code_search_index", @search_term) YIELD node, score
                 WITH node, score
-                WHERE node:{find_by} {'AND node.name CONTAINS @search_term' if not fuzzy_search else ''} {repo_filter}
+                WHERE node:{find_by} {'AND STRPOS(node.name, @search_term) > 0' if not fuzzy_search else ''} {repo_filter}
                 RETURN node.name as name, node.path as path, node.line_number as line_number,
                     node.source as source, node.docstring as docstring, node.is_dependency as is_dependency
                 ORDER BY score DESC
@@ -253,7 +253,7 @@ class CodeFinder:
                     MATCH (caller)-[call:CALLS]->(target:Function {{name: @function_name, path: @path}})
                     WHERE (caller:Function OR caller:Class OR caller:File) {repo_filter}
                     OPTIONAL MATCH (caller_file:File)-[:`CONTAINS`]->(caller)
-                    RETURN DISTINCT
+                    RETURN
                         caller.name as caller_function,
                         COALESCE(caller.path, caller_file.path) as caller_file_path,
                         caller.line_number as caller_line_number,
@@ -273,7 +273,7 @@ class CodeFinder:
                         MATCH (caller)-[call:CALLS]->(target:Function {{name: @function_name}})
                         WHERE (caller:Function OR caller:Class OR caller:File) {repo_filter}
                         OPTIONAL MATCH (caller_file:File)-[:`CONTAINS`]->(caller)
-                        RETURN DISTINCT
+                        RETURN
                             caller.name as caller_function,
                             COALESCE(caller.path, caller_file.path) as caller_file_path,
                             caller.line_number as caller_line_number,
@@ -292,7 +292,7 @@ class CodeFinder:
                     MATCH (caller:Function)-[call:CALLS]->(target:Function {{name: @function_name}})
                     WHERE 1=1 {repo_filter}
                     OPTIONAL MATCH (caller_file:File)-[:`CONTAINS`]->(caller)
-                    RETURN DISTINCT
+                    RETURN
                         caller.name as caller_function,
                         caller.path as caller_file_path,
                         caller.line_number as caller_line_number,
@@ -320,7 +320,7 @@ class CodeFinder:
                     MATCH (caller)-[call:CALLS]->(called:Function)
                     WHERE STARTS_WITH(called.path, @repo_path) OR @repo_path IS NULL
                     OPTIONAL MATCH (called_file:File)-[:`CONTAINS`]->(called)
-                    RETURN DISTINCT
+                    RETURN
                         called.name as called_function,
                         called.path as called_file_path,
                         called.line_number as called_line_number,
@@ -337,7 +337,7 @@ class CodeFinder:
                     MATCH (caller:Function {{name: @function_name}})-[call:CALLS]->(called:Function)
                     WHERE STARTS_WITH(called.path, @repo_path) OR @repo_path IS NULL
                     OPTIONAL MATCH (called_file:File)-[:`CONTAINS`]->(called)
-                    RETURN DISTINCT
+                    RETURN
                         called.name as called_function,
                         called.path as called_file_path,
                         called.line_number as called_line_number,
@@ -387,7 +387,7 @@ class CodeFinder:
                 MATCH (container)-[:`CONTAINS`]->(var)
                 WHERE (container:Function OR container:Class OR container:File) {repo_filter}
                 OPTIONAL MATCH (file:File)-[:`CONTAINS`]->(container)
-                RETURN DISTINCT
+                RETURN
                     CASE 
                         WHEN container:Function THEN container.name
                         WHEN container:Class THEN container.name
@@ -424,7 +424,7 @@ class CodeFinder:
                 MATCH (child)-[:INHERITS]->(parent:Class)
                 WHERE 1=1 {repo_filter}
                 OPTIONAL MATCH (parent_file:File)-[:`CONTAINS`]->(parent)
-                RETURN DISTINCT
+                RETURN
                     parent.name as parent_class,
                     parent.path as parent_file_path,
                     parent.line_number as parent_line_number,
@@ -440,7 +440,7 @@ class CodeFinder:
                 MATCH (grandchild:Class)-[:INHERITS]->(child)
                 WHERE 1=1 {repo_filter_child}
                 OPTIONAL MATCH (child_file:File)-[:`CONTAINS`]->(grandchild)
-                RETURN DISTINCT
+                RETURN
                     grandchild.name as child_class,
                     grandchild.path as child_file_path,
                     grandchild.line_number as child_line_number,
@@ -455,7 +455,7 @@ class CodeFinder:
                 {match_clause}
                 MATCH (child)-[:`CONTAINS`]->(method:Function)
                 {repo_filter_method}
-                RETURN DISTINCT
+                RETURN
                     method.name as method_name,
                     method.path as method_file_path,
                     method.line_number as method_line_number,
@@ -481,7 +481,7 @@ class CodeFinder:
                 MATCH (class:Class)-[:`CONTAINS`]->(func:Function {{name: @function_name}})
                 WHERE 1=1 {repo_filter}
                 OPTIONAL MATCH (file:File)-[:`CONTAINS`]->(class)
-                RETURN DISTINCT
+                RETURN
                     class.name as class_name,
                     class.path as class_file_path,
                     func.name as function_name,
@@ -503,35 +503,51 @@ class CodeFinder:
 
         with self.driver.session() as session:
             repo_filter = "AND STARTS_WITH(func.path, @repo_path)" if repo_path else ""
-            decorator_filter = "AND ALL(decorator_name IN @exclude_decorated_with WHERE NOT decorator_name IN func.decorators)" if exclude_decorated_with else ""
-            func_ignore = cypher_path_not_under_ignore_dirs("func.path")
-            caller_ignore = cypher_path_not_under_ignore_dirs("caller.path")
+            decorator_filter_sql = ""
+            if exclude_decorated_with:
+                decorator_filter_sql = """
+                  AND NOT EXISTS (
+                      SELECT 1 FROM UNNEST(func.decorators) AS deco
+                      WHERE deco IN UNNEST(@exclude_decorated_with)
+                  )
+                """
+            func_ignore_sql = cypher_path_not_under_ignore_dirs("func.path")
+            caller_ignore_sql = cypher_path_not_under_ignore_dirs("caller.path")
             
+            repo_filter_sql = "AND STARTS_WITH(func.path, @repo_path)" if repo_path else ""
+                
+            # We use native Standard SQL to bypass the Spanner GQL optimizer for cross-graph EXISTS checks.
+            # Using standard SQL EXISTS (SELECT 1 FROM CALLS edge JOIN Function caller ...)
+            # ensures Spanner reliably leverages the generic idx_calls_dst edge index without full table scans.
             query = f"""
-                MATCH (func:Function)
-                WHERE func.is_dependency = false {repo_filter} {func_ignore}
-                  AND NOT func.name IN ['main', 'setup', 'run']
-                  AND NOT (STARTS_WITH(func.name, '__') AND ENDS_WITH(func.name, '__'))
-                  AND NOT STARTS_WITH(func.name, '_test')
-                  AND NOT STARTS_WITH(func.name, 'test_')
-                  AND NOT func.name CONTAINS 'main'
-                  AND NOT toLower(func.name) CONTAINS 'application'
-                  AND NOT toLower(func.name) CONTAINS 'entry'
-                  AND NOT toLower(func.name) CONTAINS 'entrypoint'
-                  {decorator_filter}
-                WITH func
-                OPTIONAL MATCH (caller:Function)-[:CALLS]->(func)
-                WHERE caller.is_dependency = false {caller_ignore}
-                WITH func, count(caller) as caller_count
-                WHERE caller_count = 0
-                OPTIONAL MATCH (file:File)-[:`CONTAINS`]->(func)
-                RETURN
+                SELECT 
                     func.name as function_name,
                     func.path as path,
                     func.line_number as line_number,
                     func.docstring as docstring,
                     func.context as context,
-                    file.name as file_name
+                    IFNULL(file.name, "") as file_name
+                FROM `Function` func
+                LEFT JOIN `CONTAINS` c ON c.dst_id = func.uid
+                LEFT JOIN `File` file ON c.src_id = file.path
+                WHERE func.is_dependency = false {repo_filter_sql} {func_ignore_sql}
+                  AND func.name NOT IN ('main', 'setup', 'run')
+                  AND NOT (STARTS_WITH(func.name, '__') AND ENDS_WITH(func.name, '__'))
+                  AND NOT STARTS_WITH(func.name, '_test')
+                  AND NOT STARTS_WITH(func.name, 'test_')
+                  AND NOT STARTS_WITH(func.name, 'Test')
+                  AND NOT STARTS_WITH(func.name, 'Benchmark')
+                  AND STRPOS(func.name, 'main') = 0
+                  AND STRPOS(LOWER(func.name), 'application') = 0
+                  AND STRPOS(LOWER(func.name), 'entry') = 0
+                  AND STRPOS(LOWER(func.name), 'entrypoint') = 0
+                  {decorator_filter_sql}
+                  AND NOT EXISTS (
+                      SELECT 1 FROM CALLS edge
+                      JOIN `Function` caller ON edge.src_id = caller.uid
+                      WHERE edge.dst_id = func.uid 
+                        AND caller.is_dependency = false {caller_ignore_sql}
+                  )
                 ORDER BY func.path, func.line_number
                 LIMIT 50
             """
@@ -560,7 +576,7 @@ class CodeFinder:
                     WITH f as f, p as p, nodes(p) as path_nodes
                     WITH f as f, path_nodes as path_nodes, path_nodes[size(path_nodes)] as target
                     WHERE target.name = @function_name AND target.path = @path {repo_filter}
-                    RETURN DISTINCT f.name AS caller_name, f.path AS caller_file_path, f.line_number AS caller_line_number, f.is_dependency AS caller_is_dependency
+                    RETURN f.name AS caller_name, f.path AS caller_file_path, f.line_number AS caller_line_number, f.is_dependency AS caller_is_dependency
                     ORDER BY caller_is_dependency ASC, caller_file_path, caller_line_number
                     LIMIT 50
                 """
@@ -572,7 +588,7 @@ class CodeFinder:
                     WITH f as f, p as p, nodes(p) as path_nodes
                     WITH f as f, path_nodes as path_nodes, path_nodes[size(path_nodes)] as target
                     WHERE target.name = @function_name {repo_filter}
-                    RETURN DISTINCT f.name AS caller_name, f.path AS caller_file_path, f.line_number AS caller_line_number, f.is_dependency AS caller_is_dependency
+                    RETURN f.name AS caller_name, f.path AS caller_file_path, f.line_number AS caller_line_number, f.is_dependency AS caller_is_dependency
                     ORDER BY caller_is_dependency ASC, caller_file_path, caller_line_number
                     LIMIT 50
                 """
@@ -591,7 +607,7 @@ class CodeFinder:
                     WITH p as p, nodes(p) as path_nodes
                     WITH path_nodes[size(path_nodes)] as f
                     {repo_filter}
-                    RETURN DISTINCT f.name AS callee_name, f.path AS callee_file_path, f.line_number AS callee_line_number, f.is_dependency AS callee_is_dependency
+                    RETURN f.name AS callee_name, f.path AS callee_file_path, f.line_number AS callee_line_number, f.is_dependency AS callee_is_dependency
                     ORDER BY callee_is_dependency ASC, callee_file_path, callee_line_number
                     LIMIT 50
                 """
@@ -604,7 +620,7 @@ class CodeFinder:
                     WITH p as p, nodes(p) as path_nodes
                     WITH path_nodes[size(path_nodes)] as f
                     {repo_filter}
-                    RETURN DISTINCT f.name AS callee_name, f.path AS callee_file_path, f.line_number AS callee_line_number, f.is_dependency AS callee_is_dependency
+                    RETURN f.name AS callee_name, f.path AS callee_file_path, f.line_number AS callee_line_number, f.is_dependency AS callee_is_dependency
                     ORDER BY callee_is_dependency ASC, callee_file_path, callee_line_number
                     LIMIT 50
                 """
@@ -754,7 +770,7 @@ class CodeFinder:
                 MATCH (file:File)-[imp:IMPORTS]->(module:Module {{name: @module_name}})
                 WHERE 1=1 {repo_filter}
                 OPTIONAL MATCH (repo:Repository)-[:`CONTAINS`]->(file)
-                RETURN DISTINCT
+                RETURN
                     file.path as importer_file_path,
                     imp.line_number as import_line_number,
                     file.is_dependency as file_is_dependency,
@@ -769,7 +785,7 @@ class CodeFinder:
                 MATCH (file:File)-[:IMPORTS]->(target_module:Module {{name: @module_name}})
                 MATCH (file)-[imp:IMPORTS]->(other_module:Module)
                 WHERE other_module <> target_module {repo_filter}
-                RETURN DISTINCT
+                RETURN
                     other_module.name as imported_module,
                     imp.alias as import_alias
                 ORDER BY other_module.name
@@ -793,7 +809,7 @@ class CodeFinder:
                     OPTIONAL MATCH (container)-[:`CONTAINS`]->(var)
                     WHERE container:Function OR container:Class OR container:File
                     OPTIONAL MATCH (file:File)-[:`CONTAINS`]->(var)
-                    RETURN DISTINCT
+                    RETURN
                         var.name as variable_name,
                         var.value as variable_value,
                         var.line_number as line_number,
@@ -819,7 +835,7 @@ class CodeFinder:
                     OPTIONAL MATCH (container)-[:`CONTAINS`]->(var)
                     WHERE container:Function OR container:Class OR container:File
                     OPTIONAL MATCH (file:File)-[:`CONTAINS`]->(var)
-                    RETURN DISTINCT
+                    RETURN
                         var.name as variable_name,
                         var.value as variable_value,
                         var.line_number as line_number,

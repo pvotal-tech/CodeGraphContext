@@ -262,7 +262,7 @@ def get_repository_stats(code_finder: CodeFinder, **args) -> Dict[str, Any]:
         with code_finder.db_manager.get_driver().session() as session:
             if repo_path:
                 # Stats for specific repository
-                repo_path_obj = str(Path(repo_path).resolve())
+                repo_path_obj = repo_path
                 
                 # Check if repository exists
                 repo_query = """
@@ -277,19 +277,19 @@ def get_repository_stats(code_finder: CodeFinder, **args) -> Dict[str, Any]:
                     }
                 
                 # 1. Files
-                file_query = "MATCH (r:Repository {path: @path})-[:`CONTAINS`]->{1, 15}(f:File) RETURN count(f) as c"
+                file_query = "MATCH (f:File) WHERE STARTS_WITH(f.path, @path) RETURN count(f) as c"
                 file_count = session.run(file_query, path=repo_path_obj).single()["c"]
                 
                 # 2. Functions
-                func_query = "MATCH (r:Repository {path: @path})-[:`CONTAINS`]->{1, 15}(func:Function) RETURN count(func) as c"
+                func_query = "MATCH (func:Function) WHERE STARTS_WITH(func.path, @path) RETURN count(func) as c"
                 func_count = session.run(func_query, path=repo_path_obj).single()["c"]
                 
                 # 3. Classes
-                class_query = "MATCH (r:Repository {path: @path})-[:`CONTAINS`]->{1, 15}(cls:Class) RETURN count(cls) as c"
+                class_query = "MATCH (cls:Class) WHERE STARTS_WITH(cls.path, @path) RETURN count(cls) as c"
                 class_count = session.run(class_query, path=repo_path_obj).single()["c"]
                 
                 # 4. Modules (imported)
-                module_query = "MATCH (r:Repository {path: @path})-[:`CONTAINS`]->{1, 15}(f:File)-[:IMPORTS]->(m:Module) RETURN count(DISTINCT m) as c"
+                module_query = "MATCH (f:File)-[:IMPORTS]->(m:Module) WHERE STARTS_WITH(f.path, @path) RETURN count(DISTINCT m) as c"
                 module_count = session.run(module_query, path=repo_path_obj).single()["c"]
                 
                 return {

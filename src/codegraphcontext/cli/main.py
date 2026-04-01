@@ -1954,7 +1954,7 @@ def analyze_dead_code(
     
     try:
         exclude_list = exclude_decorators.split(',') if exclude_decorators else []
-        results = code_finder.find_dead_code(exclude_list)
+        results = code_finder.find_dead_code(exclude_decorated_with=exclude_list, repo_path=path)
         
         unused_funcs = results.get('potentially_unused_functions', [])
         
