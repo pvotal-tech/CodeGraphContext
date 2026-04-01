@@ -744,8 +744,8 @@ class SpannerSessionWrapper:
                     if properties_json:
                         sql_params['properties'] = properties_json
                         
-                # e.g., SET var.prop = $val
-                for set_prop_match in re.finditer(r'SET\s+' + node_var + r'\.([a-zA-Z0-9_]+)\s*=\s*\$([a-zA-Z0-9_]+)', query):
+                # e.g., SET var.prop = $val or var.prop = $val (when part of comma-separated list)
+                for set_prop_match in re.finditer(r'\b' + node_var + r'\.([a-zA-Z0-9_]+)\s*=\s*\$([a-zA-Z0-9_]+)', query):
                     prop_k = set_prop_match.group(1)
                     prop_v_param = set_prop_match.group(2)
                     if prop_v_param in parameters:
