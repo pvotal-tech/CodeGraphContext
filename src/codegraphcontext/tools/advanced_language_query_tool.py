@@ -14,7 +14,7 @@ from ..tools.query_tool_languages.csharp_toolkit import CSharpToolkit
 from ..tools.query_tool_languages.dart_toolkit import DartToolkit
 from ..tools.query_tool_languages.perl_toolkit import PerlToolkit
 
-from ..core.database import DatabaseManager
+from ..core.database_spanner import SpannerDBManager as DatabaseManager
 from ..utils.debug_log import debug_log
 
 logger = logging.getLogger(__name__)

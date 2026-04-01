@@ -9,7 +9,7 @@ import json
 import sys
 import shutil
 import yaml 
-from codegraphcontext.core.database import DatabaseManager
+from codegraphcontext.core.database_spanner import SpannerDBManager as DatabaseManager
 
 console = Console()
 

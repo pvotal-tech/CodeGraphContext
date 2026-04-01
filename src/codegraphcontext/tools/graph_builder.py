@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Coroutine, Dict, Optional, Tuple
 from datetime import datetime
 
-from ..core.database import DatabaseManager
+from ..core.database_spanner import SpannerDBManager as DatabaseManager
 from ..core.jobs import JobManager, JobStatus
 from ..utils.debug_log import debug_log, info_logger, error_logger, warning_logger
 
@@ -386,15 +386,13 @@ class GraphBuilder:
     def add_repository_to_graph(self, repo_uri: str, repo_name: str, is_dependency: bool = False):
         """Adds a repository node using its virtual URI as the unique key."""
         with self.driver.session() as session:
-            session.run(
-                """
-                MERGE (r:Repository {path: $path})
-                SET r.name = $name, r.is_dependency = $is_dependency
-                """,
-                path=repo_uri,
-                name=repo_name,
-                is_dependency=is_dependency,
-            )
+            payload = {
+                "type": "node_merge",
+                "table": "Repository",
+                "_params": {"path": repo_uri, "name": repo_name, "is_dependency": is_dependency}
+            }
+            if hasattr(session, 'run_batch'):
+                session.run_batch([payload])
 
     # First pass to add file and its contents
     def add_file_to_graph(self, file_data: Dict, repo_name: str, imports_map: dict):
@@ -417,16 +415,20 @@ class GraphBuilder:
             batch_support = hasattr(session, 'run_batch')
             batch_queries = []
 
-            def execute_or_queue(query, **kwargs):
+            def execute_or_queue(payload: dict):
                 if batch_support:
-                    batch_queries.append((query, kwargs))
-                else:
-                    session.run(query, **kwargs)
+                    batch_queries.append(payload)
 
-            execute_or_queue("""
-                MERGE (f:File {path: $path})
-                SET f.name = $name, f.relative_path = $relative_path, f.is_dependency = $is_dependency
-            """, path=file_uri, name=file_name, relative_path=relative_path, is_dependency=is_dependency)
+            execute_or_queue({
+                "type": "node_merge",
+                "table": "File",
+                "_params": {
+                    "path": file_uri, 
+                    "name": file_name, 
+                    "relative_path": relative_path, 
+                    "is_dependency": is_dependency
+                }
+            })
 
             parent_path = repo_uri
             parent_label = 'Repository'
@@ -439,21 +441,38 @@ class GraphBuilder:
                 else:
                     current_path_str = f"{parent_path}/{part}"
                 
-                execute_or_queue(f"""
-                    MATCH (p:{parent_label} {{path: $parent_path}})
-                    MERGE (d:Directory {{path: $current_path}})
-                    SET d.name = $part
-                    MERGE (p)-[:CONTAINS]->(d)
-                """, parent_path=parent_path, current_path=current_path_str, part=part, p_pk=parent_path, d_pk=current_path_str)
+                execute_or_queue({
+                    "type": "node_merge",
+                    "table": "Directory",
+                    "_params": {"path": current_path_str, "name": part}
+                })
+                
+                import uuid
+                edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"CONTAINS_{parent_path}_{current_path_str}_"))
+                execute_or_queue({
+                    "type": "edge_merge",
+                    "edge_label": "CONTAINS",
+                    "sql_params": {
+                        "id": edge_id,
+                        "src_id": parent_path,
+                        "dst_id": current_path_str
+                    }
+                })
 
                 parent_path = current_path_str
                 parent_label = 'Directory'
 
-            execute_or_queue(f"""
-                MATCH (p:{parent_label} {{path: $parent_path}})
-                MATCH (f:File {{path: $path}})
-                MERGE (p)-[:CONTAINS]->(f)
-            """, parent_path=parent_path, path=file_uri, p_pk=parent_path, f_pk=file_uri)
+            import uuid
+            file_edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"CONTAINS_{parent_path}_{file_uri}_"))
+            execute_or_queue({
+                "type": "edge_merge",
+                "edge_label": "CONTAINS",
+                "sql_params": {
+                    "id": file_edge_id,
+                    "src_id": parent_path,
+                    "dst_id": file_uri
+                }
+            })
 
             # CONTAINS relationships for functions, classes, and variables
             # To add a new language-specific node type (e.g., 'Trait' for Rust):
@@ -485,23 +504,29 @@ class GraphBuilder:
                     item_uid = str(uuid.uuid5(uuid.NAMESPACE_OID, uid_str))
                     item['uid'] = item_uid # Make it available for AST caching later
 
-                    query = f"""
-                        MATCH (f:File {{path: $path}})
-                        MERGE (n:{label} {{uid: $uid}})
-                        SET n.name = $name, n.path = $path, n.line_number = $line_number
-                        SET n += $props
-                        MERGE (f)-[:CONTAINS]->(n)
-                    """
-
-                    # Strip non-primitive fields (dicts, tuples, lists-of-dicts)
-                    # before writing to the database to avoid runtime errors such as
-                    # "Property values can only be of primitive types or arrays of
-                    # primitive types" raised by FalkorDB / KùzuDB.
-                    # _sanitize_props also truncates long strings to avoid Neo4j's
-                    # 8 kB RANGE-index limit (seen with long C++ template names).
                     safe_props = self._sanitize_props(item)
+                    safe_props["name"] = item['name']
+                    safe_props["path"] = file_path_str
+                    safe_props["line_number"] = item.get('line_number')
+                    safe_props["uid"] = item_uid
+
                     try:
-                        execute_or_queue(query, path=file_path_str, name=item['name'], line_number=item['line_number'], uid=item_uid, props=safe_props, f_pk=file_path_str, n_pk=item_uid)
+                        execute_or_queue({
+                            "type": "node_merge",
+                            "table": label,
+                            "_params": safe_props
+                        })
+                        
+                        f_edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"CONTAINS_{file_path_str}_{item_uid}_"))
+                        execute_or_queue({
+                            "type": "edge_merge",
+                            "edge_label": "CONTAINS",
+                            "sql_params": {
+                                "id": f_edge_id,
+                                "src_id": file_path_str,
+                                "dst_id": item_uid
+                            }
+                        })
                     except Exception as node_err:
                         err_str = str(node_err)
                         if "too large to index" in err_str or "property size" in err_str.lower():
@@ -516,20 +541,36 @@ class GraphBuilder:
                         for arg_name in item.get('args', []):
                             p_uid_str = f"Parameter_{file_path_str}_{arg_name}_{item.get('line_number', '')}_"
                             p_uid = str(uuid.uuid5(uuid.NAMESPACE_OID, p_uid_str))
-                            execute_or_queue("""
-                                MATCH (fn:Function {uid: $fn_uid})
-                                MERGE (p:Parameter {uid: $p_uid})
-                                SET p.name = $arg_name, p.path = $path, p.function_line_number = $line_number
-                                MERGE (fn)-[:HAS_PARAMETER]->(p)
-                            """, fn_uid=item_uid, p_uid=p_uid, arg_name=arg_name, path=file_path_str, line_number=item['line_number'], fn_pk=item_uid, p_pk=p_uid)
+                            
+                            execute_or_queue({
+                                "type": "node_merge",
+                                "table": "Parameter",
+                                "_params": {
+                                    "uid": p_uid,
+                                    "name": arg_name,
+                                    "path": file_path_str,
+                                    "function_line_number": item.get('line_number')
+                                }
+                            })
+                            
+                            p_edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"HAS_PARAMETER_{item_uid}_{p_uid}_"))
+                            execute_or_queue({
+                                "type": "edge_merge",
+                                "edge_label": "HAS_PARAMETER",
+                                "sql_params": {
+                                    "id": p_edge_id,
+                                    "src_id": item_uid,
+                                    "dst_id": p_uid
+                                }
+                            })
 
             # --- NEW: persist Ruby Modules ---
             for m in file_data.get('modules', []):
-                execute_or_queue("""
-                    MERGE (mod:Module {name: $name})
-                    ON CREATE SET mod.lang = $lang
-                    ON MATCH  SET mod.lang = coalesce(mod.lang, $lang)
-                """, name=m["name"], lang=file_data.get("lang"))
+                execute_or_queue({
+                    "type": "node_merge",
+                    "table": "Module",
+                    "_params": {"name": m["name"], "lang": file_data.get("lang")}
+                })
 
             # Create CONTAINS relationships for nested functions
             for item in file_data.get('functions', []):
@@ -540,116 +581,145 @@ class GraphBuilder:
                             outer_uid = pot.get('uid')
                             break
                     if outer_uid:
-                        execute_or_queue("""
-                            MATCH (outer:Function {uid: $outer_uid})
-                            MATCH (inner:Function {uid: $inner_uid})
-                            MERGE (outer)-[:CONTAINS]->(inner)
-                        """, outer_uid=outer_uid, inner_uid=item['uid'], outer_pk=outer_uid, inner_pk=item['uid'])
+                        execute_or_queue({
+                            "type": "edge_merge",
+                            "edge_label": "CONTAINS",
+                            "sql_params": {
+                                "id": str(uuid.uuid5(uuid.NAMESPACE_OID, f"CONTAINS_{outer_uid}_{item['uid']}_")),
+                                "src_id": outer_uid,
+                                "dst_id": item['uid']
+                            }
+                        })
 
             # Handle imports and create IMPORTS relationships
             for imp in file_data.get('imports', []):
                 info_logger(f"Processing import: {imp}")
                 lang = file_data.get('lang')
+                module_name = imp.get('source') if lang == 'javascript' else imp.get('name')
+                if not module_name: continue
+                
+                # Use a map for relationship properties to handle optional alias and line_number
+                rel_props = {}
                 if lang == 'javascript':
-                    # New, correct logic for JS
-                    module_name = imp.get('source')
-                    if not module_name: continue
-
-                    # Use a map for relationship properties to handle optional alias and line_number
-                    rel_props = {'imported_name': imp.get('name', '*')}
-                    if imp.get('alias'):
-                        rel_props['alias'] = imp.get('alias')
-                    if imp.get('line_number'):
-                        rel_props['line_number'] = imp.get('line_number')
-
-                    execute_or_queue("""
-                        MATCH (f:File {path: $path})
-                        MERGE (m:Module {name: $module_name})
-                        MERGE (f)-[r:IMPORTS]->(m)
-                        SET r += $props
-                    """, path=file_path_str, module_name=module_name, props=rel_props, f_pk=file_path_str, m_pk=module_name)
+                    rel_props['imported_name'] = imp.get('name', '*')
                 else:
-                    # Existing logic for Python (and other languages)
-                    # For KùzuDB, Module schema only has: name, lang, full_import_name.
-                    # 'alias' belongs on the relationship.
-                    
-                    set_clauses = []
                     if 'full_import_name' in imp:
-                        set_clauses.append("m.full_import_name = $full_import_name")
+                        rel_props['full_import_name'] = imp.get('full_import_name')
+                        
+                if imp.get('alias'):
+                    rel_props['alias'] = imp.get('alias')
+                if imp.get('line_number'):
+                    rel_props['line_number'] = imp.get('line_number')
+
+                if lang != 'javascript':
+                    sanitized = self._sanitize_props(imp)
+                    for k, v in sanitized.items():
+                        if k not in ['name', 'path', 'line_number', 'alias', 'full_import_name', 'source']:
+                            rel_props[k] = v
+
+                node_payload = {"name": module_name}
+                if lang != 'javascript' and 'full_import_name' in imp:
+                    node_payload["full_import_name"] = imp.get('full_import_name')
                     
-                    set_clause_str = ("SET " + ", ".join(set_clauses)) if set_clauses else ""
+                execute_or_queue({
+                    "type": "node_merge",
+                    "table": "Module",
+                    "_params": node_payload
+                })
 
-                    # Build relationship properties
-                    rel_props = {}
-                    if imp.get('line_number'):
-                        rel_props['line_number'] = imp.get('line_number')
-                    if imp.get('alias'):
-                        rel_props['alias'] = imp.get('alias')
-                    
-                    # Ensure full_import_name is available in params for SET clause
-                    params = imp.copy()
-                    params['path'] = file_path_str
-                    params['module_name'] = imp.get('name') # Use 'name' from imp as module name
+                import uuid
+                r_edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"IMPORTS_{file_path_str}_{module_name}_"))
+                rel_params = {
+                    "id": r_edge_id,
+                    "src_id": file_path_str,
+                    "dst_id": module_name
+                }
+                for k, v in rel_props.items():
+                    rel_params[k] = v
 
-                    # Sanitize scalar params but keep rel_props as a dict
-                    # (FalkorDB SET r += $rel_props requires a map, not a string)
-                    sanitized = self._sanitize_props(params)
-                    sanitized['rel_props'] = rel_props
-
-                    execute_or_queue(f"""
-                        MATCH (f:File {{path: $path}})
-                        MERGE (m:Module {{name: $module_name}})
-                        {set_clause_str}
-                        MERGE (f)-[r:IMPORTS]->(m)
-                        SET r += $rel_props
-                    """, f_pk=file_path_str, m_pk=imp.get('name'), **sanitized)
+                execute_or_queue({
+                    "type": "edge_merge",
+                    "edge_label": "IMPORTS",
+                    "sql_params": rel_params
+                })
 
             # Handle CONTAINS relationship between class to their children like variables
-            local_class_names = {c['name'] for c in file_data.get('classes', [])}
+            local_class_names = {c['name']: c.get('uid') for c in file_data.get('classes', [])}
             for func in file_data.get('functions', []):
-                if func.get('class_context'):
+                class_context = func.get('class_context')
+                if class_context:
                     # Try same-file match first (Python, JS, etc.)
-                    if func['class_context'] in local_class_names:
-                        c_uid = None
-                        for c in file_data.get('classes', []):
-                            if c['name'] == func['class_context']:
-                                c_uid = c.get('uid')
-                                break
-                        if c_uid:
-                            execute_or_queue("""
-                                MATCH (c:Class {uid: $c_uid})
-                                MATCH (fn:Function {uid: $fn_uid})
-                                MERGE (c)-[:CONTAINS]->(fn)
-                            """,
-                                c_uid=c_uid,
-                                fn_uid=func['uid'],
-                                c_pk=c_uid,
-                                fn_pk=func['uid']
-                            )
+                    c_uid = local_class_names.get(class_context)
+                    if c_uid:
+                        execute_or_queue({
+                            "type": "edge_merge",
+                            "edge_label": "CONTAINS",
+                            "sql_params": {
+                                "id": str(uuid.uuid5(uuid.NAMESPACE_OID, f"CONTAINS_{c_uid}_{func['uid']}_")),
+                                "src_id": c_uid,
+                                "dst_id": func['uid']
+                            }
+                        })
                     else:
                         # Cross-file match for C/C++ where class is in .h and method in .cpp.
-                        # Note: matches by class name only (no path constraint), so classes
-                        # with identical names in different files could get false links.
-                        execute_or_queue("""
-                            MATCH (c:Class {name: $class_name})
-                            MATCH (fn:Function {uid: $fn_uid})
-                            MERGE (c)-[:CONTAINS]->(fn)
-                        """,
-                            class_name=func['class_context'],
-                            fn_uid=func['uid'],
-                            fn_pk=func['uid']
-                        )
+                        execute_or_queue({
+                            "type": "edge_merge",
+                            "edge_label": "CONTAINS",
+                            "sql_params": {
+                                "dst_id": func['uid']
+                            },
+                            "original_parameters": {
+                                "class_name": class_context
+                            },
+                            "match_lookups": {
+                                "c": {
+                                    "table": "Class",
+                                    "pk": "uid",
+                                    "criteria": [["name", "param", "class_name"]]
+                                }
+                            },
+                            "src_var": "c",
+                            "dst_var": "fn",
+                            "src_pk": "uid",
+                            "dst_pk": "uid",
+                            "edge_props_raw": ""
+                        })
 
             # --- NEW: Class INCLUDES Module (Ruby mixins) ---
             for inc in file_data.get('module_inclusions', []):
-                execute_or_queue("""
-                    MATCH (c:Class {name: $class_name, path: $path})
-                    MERGE (m:Module {name: $module_name})
-                    MERGE (c)-[:INCLUDES]->(m)
-                """,
-                class_name=inc["class"],
-                path=file_path_str,
-                module_name=inc["module"])
+                execute_or_queue({
+                    "type": "node_merge",
+                    "table": "Module",
+                    "_params": {"name": inc["module"]}
+                })
+                
+                execute_or_queue({
+                    "type": "edge_merge",
+                    "edge_label": "INCLUDES",
+                    "sql_params": {},
+                    "original_parameters": {
+                        "class_name": inc["class"],
+                        "path": file_path_str,
+                        "module_name": inc["module"]
+                    },
+                    "match_lookups": {
+                        "c": {
+                            "table": "Class",
+                            "pk": "uid",
+                            "criteria": [["name", "param", "class_name"], ["path", "param", "path"]]
+                        },
+                        "m": {
+                            "table": "Module",
+                            "pk": "name",
+                            "criteria": [["name", "param", "module_name"]]
+                        }
+                    },
+                    "src_var": "c",
+                    "dst_var": "m",
+                    "src_pk": "uid",
+                    "dst_pk": "name",
+                    "edge_props_raw": ""
+                })
 
             if batch_support and batch_queries:
                 session.run_batch(batch_queries)
@@ -840,49 +910,63 @@ class GraphBuilder:
                 
                 # Optimistic PK injection to bypass Spanner execute_sql lookups
                 caller_pk = self.exact_functions.get((caller_name, caller_file_path)) or self.exact_classes.get((caller_name, caller_file_path))
+
+                import uuid
+                edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"CALLS_{caller_name}_{caller_file_path}_{called_name}_{resolved_path}_{call.get('line_number', 0)}"))
+                
+                base_payload = {
+                    "type": "edge_merge",
+                    "edge_label": "CALLS",
+                    "sql_params": {
+                        "id": edge_id,
+                        "line_number": call['line_number'],
+                        "args": call.get('args', []),
+                        "full_call_name": call.get('full_name', called_name)
+                    },
+                    "original_parameters": call_params,
+                    "src_var": "caller",
+                    "dst_var": "called",
+                    "src_pk": "uid",
+                    "dst_pk": "uid",
+                    "edge_props_raw": "line_number: $line_number, args: $args, full_call_name: $full_call_name"
+                }
+
                 if caller_pk:
-                    call_params['caller_pk'] = caller_pk
+                    base_payload["sql_params"]["src_id"] = caller_pk
+                else:
+                    base_payload.setdefault("match_lookups", {})["caller"] = {
+                        "table": caller_label,
+                        "pk": "uid",
+                        "criteria": [["name", "param", "caller_name"], ["path", "param", "caller_file_path"]]
+                    }
 
                 if resolved_path:
                     if (called_name, resolved_path) in self.exact_functions:
-                        call_params['called_pk'] = self.exact_functions[(called_name, resolved_path)]
-                        batch_queries.append((f"""
-                            MATCH (caller:{caller_label} {{name: $caller_name, path: $caller_file_path}})
-                            MATCH (called:Function {{name: $called_name, path: $called_file_path}})
-                            MERGE (caller)-[:CALLS {{line_number: $line_number, args: $args, full_call_name: $full_call_name}}]->(called)
-                        """, call_params))
+                        base_payload["sql_params"]["dst_id"] = self.exact_functions[(called_name, resolved_path)]
+                        batch_queries.append(base_payload)
                     elif (called_name, resolved_path) in self.exact_classes:
                         called_class_pk = self.exact_classes[(called_name, resolved_path)]
-                        call_params['called_pk'] = called_class_pk
-                        
                         if (called_name, resolved_path) in self._exact_class_has_init:
                             init_pk = self._exact_class_has_init[(called_name, resolved_path)]
-                            call_params['init_pk'] = init_pk
-                            batch_queries.append((f"""
-                                MATCH (caller:{caller_label} {{name: $caller_name, path: $caller_file_path}})
-                                MATCH (called:Class {{name: $called_name, path: $called_file_path}})
-                                MATCH (called)-[:CONTAINS]->(init:Function)
-                                WHERE init.name IN ["__init__", "constructor"]
-                                MERGE (caller)-[:CALLS {{line_number: $line_number, args: $args, full_call_name: $full_call_name}}]->(init)
-                            """, call_params))
+                            base_payload["sql_params"]["dst_id"] = init_pk
+                            batch_queries.append(base_payload)
                         else:
-                            batch_queries.append((f"""
-                                MATCH (caller:{caller_label} {{name: $caller_name, path: $caller_file_path}})
-                                MATCH (called:Class {{name: $called_name, path: $called_file_path}})
-                                MERGE (caller)-[:CALLS {{line_number: $line_number, args: $args, full_call_name: $full_call_name}}]->(called)
-                            """, call_params))
+                            base_payload["sql_params"]["dst_id"] = called_class_pk
+                            batch_queries.append(base_payload)
                     else:
-                        batch_queries.append((f"""
-                            MATCH (caller:{caller_label} {{name: $caller_name, path: $caller_file_path}})
-                            MATCH (called:Function {{name: $called_name}})
-                            MERGE (caller)-[:CALLS {{line_number: $line_number, args: $args, full_call_name: $full_call_name}}]->(called)
-                        """, call_params))
+                        base_payload.setdefault("match_lookups", {})["called"] = {
+                            "table": "Function",
+                            "pk": "uid",
+                            "criteria": [["name", "param", "called_name"]]
+                        }
+                        batch_queries.append(base_payload)
                 else:
-                    batch_queries.append((f"""
-                        MATCH (caller:{caller_label} {{name: $caller_name, path: $caller_file_path}})
-                        MATCH (called:Function {{name: $called_name}})
-                        MERGE (caller)-[:CALLS {{line_number: $line_number, args: $args, full_call_name: $full_call_name}}]->(called)
-                    """, call_params))
+                    base_payload.setdefault("match_lookups", {})["called"] = {
+                        "table": "Function",
+                        "pk": "uid",
+                        "criteria": [["name", "param", "called_name"]]
+                    }
+                    batch_queries.append(base_payload)
 
             else:
                 # File-level calls: Try Function first, then Class
@@ -895,46 +979,55 @@ class GraphBuilder:
                     'full_call_name': call.get('full_name', called_name)
                 })
                 
-                call_params['caller_pk'] = caller_file_path # File paths are their own PK
+                import uuid
+                edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"CALLS_{caller_file_path}_{called_name}_{resolved_path}_{call.get('line_number', 0)}"))
+                
+                base_payload = {
+                    "type": "edge_merge",
+                    "edge_label": "CALLS",
+                    "sql_params": {
+                        "id": edge_id,
+                        "src_id": caller_file_path,
+                        "line_number": call['line_number'],
+                        "args": call.get('args', []),
+                        "full_call_name": call.get('full_name', called_name)
+                    },
+                    "original_parameters": call_params,
+                    "src_var": "caller",
+                    "dst_var": "called",
+                    "src_pk": "path",
+                    "dst_pk": "uid",
+                    "edge_props_raw": "line_number: $line_number, args: $args, full_call_name: $full_call_name"
+                }
 
                 if resolved_path:
                     if (called_name, resolved_path) in self.exact_functions:
-                        call_params['called_pk'] = self.exact_functions[(called_name, resolved_path)]
-                        batch_queries.append(("""
-                            MATCH (caller:File {path: $caller_file_path})
-                            MATCH (called:Function {name: $called_name, path: $called_file_path})
-                            MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                        """, call_params))
+                        base_payload["sql_params"]["dst_id"] = self.exact_functions[(called_name, resolved_path)]
+                        batch_queries.append(base_payload)
                     elif (called_name, resolved_path) in self.exact_classes:
-                        call_params['called_pk'] = self.exact_classes[(called_name, resolved_path)]
+                        called_class_pk = self.exact_classes[(called_name, resolved_path)]
                         if (called_name, resolved_path) in self._exact_class_has_init:
                             init_pk = self._exact_class_has_init[(called_name, resolved_path)]
-                            call_params['init_pk'] = init_pk
-                            batch_queries.append(("""
-                                MATCH (caller:File {path: $caller_file_path})
-                                MATCH (called:Class {name: $called_name, path: $called_file_path})
-                                MATCH (called)-[:CONTAINS]->(init:Function)
-                                WHERE init.name IN ["__init__", "constructor"]
-                                MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(init)
-                            """, call_params))
+                            base_payload["sql_params"]["dst_id"] = init_pk
+                            batch_queries.append(base_payload)
                         else:
-                            batch_queries.append(("""
-                                MATCH (caller:File {path: $caller_file_path})
-                                MATCH (called:Class {name: $called_name, path: $called_file_path})
-                                MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                            """, call_params))
+                            base_payload["sql_params"]["dst_id"] = called_class_pk
+                            batch_queries.append(base_payload)
                     else:
-                        batch_queries.append(("""
-                            MATCH (caller:File {path: $caller_file_path})
-                            MATCH (called:Function {name: $called_name})
-                            MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                        """, call_params))
+                        base_payload.setdefault("match_lookups", {})["called"] = {
+                            "table": "Function",
+                            "pk": "uid",
+                            "criteria": [["name", "param", "called_name"]]
+                        }
+                        batch_queries.append(base_payload)
                 else:
-                    batch_queries.append(("""
-                        MATCH (caller:File {path: $caller_file_path})
-                        MATCH (called:Function {name: $called_name})
-                        MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                    """, call_params))
+                    base_payload.setdefault("match_lookups", {})["called"] = {
+                        "table": "Function",
+                        "pk": "uid",
+                        "criteria": [["name", "param", "called_name"]]
+                    }
+                    batch_queries.append(base_payload)
+
 
     def _create_all_function_calls(self, all_file_data: list[Dict], imports_map: dict):
         """Create CALLS relationships for all functions after all files have been processed."""
@@ -1034,19 +1127,46 @@ class GraphBuilder:
                         'parent_name': target_class_name,
                         'resolved_parent_file_path': resolved_path
                     }
-                    
                     # Optimistic PK injection
                     child_pk = self.exact_classes.get((class_item['name'], caller_file_path))
                     parent_pk = self.exact_classes.get((target_class_name, resolved_path))
-                    if child_pk: params['child_pk'] = child_pk
-                    if parent_pk: params['parent_pk'] = parent_pk
                     
-                    batch_queries.append(("""
-                        MATCH (child:Class {name: $child_name, path: $path})
-                        MATCH (parent:Class {name: $parent_name, path: $resolved_parent_file_path})
-                        MERGE (child)-[:INHERITS]->(parent)
-                    """, params))
+                    import uuid
+                    edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"INHERITS_{class_item['name']}_{caller_file_path}_{target_class_name}_{resolved_path}"))
 
+                    base_payload = {
+                        "type": "edge_merge",
+                        "edge_label": "INHERITS",
+                        "sql_params": {
+                            "id": edge_id
+                        },
+                        "original_parameters": params,
+                        "src_var": "child",
+                        "dst_var": "parent",
+                        "src_pk": "uid",
+                        "dst_pk": "uid",
+                        "edge_props_raw": ""
+                    }
+
+                    if child_pk:
+                        base_payload["sql_params"]["src_id"] = child_pk
+                    else:
+                        base_payload.setdefault("match_lookups", {})["child"] = {
+                            "table": "Class",
+                            "pk": "uid",
+                            "criteria": [["name", "param", "child_name"], ["path", "param", "path"]]
+                        }
+
+                    if parent_pk:
+                        base_payload["sql_params"]["dst_id"] = parent_pk
+                    else:
+                        base_payload.setdefault("match_lookups", {})["parent"] = {
+                            "table": "Class",
+                            "pk": "uid",
+                            "criteria": [["name", "param", "parent_name"], ["path", "param", "resolved_parent_file_path"]]
+                        }
+
+                    batch_queries.append(base_payload)
 
     def _create_csharp_inheritance_and_interfaces(self, session, file_data: Dict, imports_map: dict, batch_queries: list):
         """Create INHERITS and IMPLEMENTS relationships for C# types."""
@@ -1092,30 +1212,66 @@ class GraphBuilder:
                     # Try to determine if it's an interface
                     if is_interface or (base_index > 0 and type_label == 'Class'):
                         # This is an IMPLEMENTS relationship
-                        batch_queries.append(("""
-                            MATCH (child {name: $child_name, path: $path})
-                            WHERE child:Class OR child:Struct OR child:Record
-                            MATCH (iface:Interface {name: $interface_name})
-                            MERGE (child)-[:IMPLEMENTS]->(iface)
-                        """, {
-                            'child_name': type_item['name'],
-                            'path': caller_file_path,
-                            'interface_name': base_name
-                        }))
+                        import uuid
+                        edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"IMPLEMENTS_{type_item['name']}_{caller_file_path}_{base_name}"))
+                        batch_queries.append({
+                            "type": "edge_merge",
+                            "edge_label": "IMPLEMENTS",
+                            "sql_params": {"id": edge_id},
+                            "original_parameters": {
+                                'child_name': type_item['name'],
+                                'path': caller_file_path,
+                                'interface_name': base_name
+                            },
+                            "match_lookups": {
+                                "child": {
+                                    "table": type_label,
+                                    "pk": "uid",
+                                    "criteria": [["name", "param", "child_name"], ["path", "param", "path"]]
+                                },
+                                "iface": {
+                                    "table": "Interface",
+                                    "pk": "uid",
+                                    "criteria": [["name", "param", "interface_name"]]
+                                }
+                            },
+                            "src_var": "child",
+                            "dst_var": "iface",
+                            "src_pk": "uid",
+                            "dst_pk": "uid",
+                            "edge_props_raw": ""
+                        })
                     else:
                         # This is an INHERITS relationship
-                        batch_queries.append(("""
-                            MATCH (child {name: $child_name, path: $path})
-                            WHERE child:Class OR child:Record OR child:Interface
-                            MATCH (parent {name: $parent_name})
-                            WHERE parent:Class OR parent:Record OR parent:Interface
-                            MERGE (child)-[:INHERITS]->(parent)
-                        """, {
-                            'child_name': type_item['name'],
-                            'path': caller_file_path,
-                            'parent_name': base_name
-                        }))
-
+                        import uuid
+                        edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"INHERITS_{type_item['name']}_{caller_file_path}_{base_name}"))
+                        batch_queries.append({
+                            "type": "edge_merge",
+                            "edge_label": "INHERITS",
+                            "sql_params": {"id": edge_id},
+                            "original_parameters": {
+                                'child_name': type_item['name'],
+                                'path': caller_file_path,
+                                'parent_name': base_name
+                            },
+                            "match_lookups": {
+                                "child": {
+                                    "table": type_label,
+                                    "pk": "uid",
+                                    "criteria": [["name", "param", "child_name"], ["path", "param", "path"]]
+                                },
+                                "parent": {
+                                    "table": "Class", # Defaulting to Class for parent
+                                    "pk": "uid",
+                                    "criteria": [["name", "param", "parent_name"]]
+                                }
+                            },
+                            "src_var": "child",
+                            "dst_var": "parent",
+                            "src_pk": "uid",
+                            "dst_pk": "uid",
+                            "edge_props_raw": ""
+                        })
     def _create_all_inheritance_links(self, all_file_data: list[Dict], imports_map: dict):
         """Create INHERITS relationships for all classes after all files have been processed."""
         with self.driver.session() as session:
@@ -1131,19 +1287,11 @@ class GraphBuilder:
                 
                 # Periodically flush the batch to prevent memory blooming or hitting API limits
                 if len(batch_queries) >= 2000:
-                    if batch_support:
-                        session.run_batch(batch_queries)
-                    else:
-                        for query, params in batch_queries:
-                            session.run(query, params)
+                    session.run_batch(batch_queries)
                     batch_queries.clear()
                     
             if batch_queries:
-                if batch_support:
-                    session.run_batch(batch_queries)
-                else:
-                    for query, params in batch_queries:
-                        session.run(query, params)
+                session.run_batch(batch_queries)
                 batch_queries.clear()
                 
     def delete_file_from_graph(self, file_uri: str):

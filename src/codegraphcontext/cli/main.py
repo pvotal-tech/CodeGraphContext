@@ -23,7 +23,7 @@ from dotenv import load_dotenv, find_dotenv, set_key
 from importlib.metadata import version as pkg_version, PackageNotFoundError
 
 from codegraphcontext.server import MCPServer
-from codegraphcontext.core.database import DatabaseManager
+from codegraphcontext.core.database_spanner import SpannerDBManager as DatabaseManager
 from .setup_wizard import run_neo4j_setup_wizard, configure_mcp_client, run_spanner_setup_wizard
 from . import config_manager
 # Import the new helper functions

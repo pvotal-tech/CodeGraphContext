@@ -4,7 +4,7 @@ import logging
 from typing import Any, Dict, List, Literal, Optional
 from pathlib import Path
 
-from ..core.database import DatabaseManager
+from ..core.database_spanner import SpannerDBManager as DatabaseManager
 from ..utils.path_ignore import cypher_path_not_under_ignore_dirs
 
 logger = logging.getLogger(__name__)

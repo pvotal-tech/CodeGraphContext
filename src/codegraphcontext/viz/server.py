@@ -9,7 +9,7 @@ import os
 import sys
 from typing import Optional, List, Dict, Any
 
-from ..core.database import DatabaseManager
+from ..core.database_spanner import SpannerDBManager as DatabaseManager
 from ..utils.debug_log import debug_log
 
 app = FastAPI()

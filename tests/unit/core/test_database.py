@@ -2,7 +2,7 @@
 import os
 import pytest
 from unittest.mock import MagicMock, patch, call
-from codegraphcontext.core.database import DatabaseManager, Neo4jDriverWrapper
+from codegraphcontext.core.database_spanner import SpannerDBManager as DatabaseManager
 
 class TestDatabaseManager:
     """

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 from neo4j.exceptions import CypherSyntaxError
 
-from ..core.database import DatabaseManager
+from ..core.database_spanner import SpannerDBManager as DatabaseManager
 from ..core.jobs import JobManager, JobStatus
 from ..utils.debug_log import debug_log
 

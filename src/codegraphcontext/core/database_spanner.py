@@ -473,12 +473,13 @@ class SpannerSessionWrapper:
                 elif sql_op.get("type") == "edge_merge":
                     edge_merges.append(sql_op)
 
-        # PASS 1: Bulk Resolution
-        scalar_subqueries = []
-        combined_params = {}
+        # PASS 1: Bulk Resolution using UNNEST arrays
+        lookups = {}
         lookup_mappings = {}
-        
         for idx, op in enumerate(edge_merges):
+            if "original_parameters" not in op:
+                continue # Simplified native payload, skip lookups
+
             params = op["original_parameters"]
             match_lookups = op.get("match_lookups", {})
             src_var, dst_var = op["src_var"], op["dst_var"]
@@ -492,122 +493,121 @@ class SpannerSessionWrapper:
             
             def add_lookup(var, pk, role):
                 if var in match_lookups:
-                    alias = f"e{idx}_{role}"
-                    lookup_mappings[(idx, role)] = alias
                     table = match_lookups[var]["table"]
                     pk_col = match_lookups[var]["pk"]
                     criteria = match_lookups[var]["criteria"]
-                    sql_criteria = []
+                    match_col = None
+                    match_val = None
                     for k, param_type, v in criteria:
                         if param_type == 'param':
-                            unique_p_name = f"{alias}_{v}"
-                            sql_criteria.append(f"{k} = @{unique_p_name}")
-                            combined_params[unique_p_name] = params.get(v)
-                        else:
-                            sql_criteria.append(f"{k} = {v}")
-                    subq = f"(SELECT {pk_col} FROM `{table}` WHERE {' AND '.join(sql_criteria)} LIMIT 1) AS {alias}"
-                    scalar_subqueries.append(subq)
+                            match_col = k
+                            match_val = params.get(v)
+                            break
+                    if match_col and match_val:
+                        key = (table, pk_col, match_col)
+                        lookups.setdefault(key, set()).add(match_val)
+                        lookup_mappings[(idx, role)] = (key, match_val)
 
             if not src_val: add_lookup(src_var, src_pk, "src")
             if not dst_val: add_lookup(dst_var, dst_pk, "dst")
 
         resolved_ids = {}
-        if scalar_subqueries:
-            CHUNK_SIZE = 500
-            for i in range(0, len(scalar_subqueries), CHUNK_SIZE):
-                chunk_sq = scalar_subqueries[i:i+CHUNK_SIZE]
-                chunk_sql = f"SELECT {', '.join(chunk_sq)}"
-                chunk_params = {k: v for k, v in combined_params.items() if f"@{k}" in chunk_sql}
-                results = transaction.execute_sql(chunk_sql, params=chunk_params)
+        # Fetch all grouped lookups using UNNEST for extreme performance
+        for (table, pk_col, match_col), values in lookups.items():
+            if not values: continue
+            vlist = list(values)
+            for i in range(0, len(vlist), 5000):
+                chunk = vlist[i:i+5000]
+                query = f"SELECT {pk_col}, {match_col} FROM `{table}` WHERE {match_col} IN UNNEST(@vals)"
+                results = transaction.execute_sql(query, params={"vals": chunk})
                 for row in results:
-                    resolved_ids.update(dict(zip([f.name for f in results.fields], row)))
+                    resolved_ids[(table, match_col, row[1])] = row[0]
         
         # PASS 2: Mutation Construction
         mutations_by_table = {}
         
         for op in node_merges:
             table = op["table"]
-            if table not in mutations_by_table:
-                mutations_by_table[table] = []
-                
-            cols_list = []
-            vals_list = []
-            for k, v in op["_params"].items():
-                cols_list.append(k)
-                if isinstance(v, dict):
-                    vals_list.append(JsonObject(v))
-                else:
-                    vals_list.append(v)
-                    
-            mutations_by_table[table].append({"cols": tuple(cols_list), "vals": vals_list})
+            params = op["_params"]
+            mutations_by_table.setdefault(table, []).append({
+                "cols": tuple(params.keys()), 
+                "vals": [JsonObject(v) if isinstance(v, dict) else v for v in params.values()]
+            })
 
         for idx, op in enumerate(edge_merges):
-            src_var, dst_var = op["src_var"], op["dst_var"]
-            src_pk, dst_pk = op["src_pk"], op["dst_pk"]
+            table = op["edge_label"]
+            if "original_parameters" not in op:
+                cols_list = []
+                vals_list = []
+                for k, v in op["sql_params"].items():
+                    cols_list.append(k)
+                    vals_list.append(JsonObject(v) if isinstance(v, dict) else v)
+                mutations_by_table.setdefault(table, []).append({"cols": tuple(cols_list), "vals": vals_list})
+                continue
+                
             params = op["original_parameters"]
             
-            src_alias = lookup_mappings.get((idx, "src"))
-            dst_alias = lookup_mappings.get((idx, "dst"))
-            fetched_src = resolved_ids.get(src_alias) if src_alias else None
-            fetched_dst = resolved_ids.get(dst_alias) if dst_alias else None
+            src_val = op["_src_val"]
+            dst_val = op["_dst_val"]
             
-            final_src_val = op["_src_val"] or fetched_src or params.get(src_pk) or f"dummy_{src_var}"
-            final_dst_val = op["_dst_val"] or fetched_dst or params.get(dst_pk) or f"dummy_{dst_var}"
+            if (idx, "src") in lookup_mappings:
+                key, mval = lookup_mappings[(idx, "src")]
+                src_val = resolved_ids.get((key[0], key[2], mval)) or src_val
+                
+            if (idx, "dst") in lookup_mappings:
+                key, mval = lookup_mappings[(idx, "dst")]
+                dst_val = resolved_ids.get((key[0], key[2], mval)) or dst_val
             
-            edge_label = op["edge_label"]
+            final_src_val = src_val or params.get(op["src_pk"]) or f"dummy_{op['src_var']}"
+            final_dst_val = dst_val or params.get(op["dst_pk"]) or f"dummy_{op['dst_var']}"
+            
             edge_props_raw = op["edge_props_raw"]
-            edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{edge_label}_{final_src_val}_{final_dst_val}_{edge_props_raw}"))
+            edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{table}_{final_src_val}_{final_dst_val}_{edge_props_raw}"))
             
             final_sql_params = op["sql_params"].copy()
             final_sql_params["id"] = edge_id
             final_sql_params["src_id"] = final_src_val
             final_sql_params["dst_id"] = final_dst_val
             
-            if edge_label not in mutations_by_table:
-                mutations_by_table[edge_label] = []
-                
             cols_list = []
             vals_list = []
             for k, v in final_sql_params.items():
                 cols_list.append(k)
-                if isinstance(v, dict):
-                    vals_list.append(JsonObject(v))
-                else:
-                    vals_list.append(v)
+                vals_list.append(JsonObject(v) if isinstance(v, dict) else v)
 
-            mutations_by_table[edge_label].append({"cols": tuple(cols_list), "vals": vals_list})
+            mutations_by_table.setdefault(table, []).append({"cols": tuple(cols_list), "vals": vals_list})
             
         # Group mutations by signature to use efficient transaction.insert_or_update
         for table, items in mutations_by_table.items():
             sigs = {}
             for item in items:
                 sig = item["cols"]
-                if sig not in sigs:
-                    sigs[sig] = []
-                sigs[sig].append(item["vals"])
+                sigs.setdefault(sig, []).append(item["vals"])
             
             for cols, values_list in sigs.items():
                 for i in range(0, len(values_list), 1000):
-                    chunk = values_list[i:i+1000]
                     transaction.insert_or_update(
                         table=table,
                         columns=list(cols),
-                        values=chunk
+                        values=values_list[i:i+1000]
                     )
 
     def run_batch(self, batch_queries: list):
-        """Executes a list of (query, parameters) tuples in a single Spanner transaction."""
+        """Executes a list of raw DICT payloads natively. Cypher strings are no longer supported in batching."""
         all_translations = []
-        for query, parameters in batch_queries:
-            aliased_query, _ = _auto_alias_return_clause(query)
-            translations, is_sql = self._translate_query(aliased_query, parameters)
-            if not is_sql or translations == "SYSTEM_DELETE_CASCADE":
-                raise ValueError("run_batch is only supported for mutating SQL translation sequences.")
-            all_translations.extend(translations)
+        for item in batch_queries:
+            if isinstance(item, tuple) and len(item) == 2:
+                q, p = item
+                if isinstance(q, dict):
+                    all_translations.append(q)
+                else:
+                    warning_logger(f"Skipping legacy string Cypher query in run_batch. Please migrate to native dictionary payload: {q[:50]}")
+            elif isinstance(item, dict):
+                all_translations.append(item)
             
         if all_translations:
             import time
-            print(f"[Spanner Batch] Executing combined transaction of {len(all_translations)} DML mutations gathered from {len(batch_queries)} GQL statements.", flush=True)
+            print(f"[Spanner Batch] Executing combined transaction of {len(all_translations)} DML mutations gathered from {len(batch_queries)} inputs...", flush=True)
             def execute_all_mutations(transaction):
                 self._execute_translations(transaction, all_translations)
             start_time = time.time()
@@ -619,56 +619,26 @@ class SpannerSessionWrapper:
         # 0. Alias the return clause to ensure GQL compliance
         aliased_query, col_map = _auto_alias_return_clause(query)
 
-        # 1. Translate Query
-        translations, is_sql = self._translate_query(aliased_query, parameters)
+        # 1. Handle Cascade Deletes intercept natively
+        if "DETACH DELETE" in aliased_query.upper():
+            return self._execute_cascade_delete(parameters)
+
+        # Pure GQL Execution
+        gql_query, safe_parameters = self._format_gql(aliased_query, parameters)
         
         try:
-            if is_sql:
-                if translations == "SYSTEM_DELETE_CASCADE":
-                    def execute_cascade_deletes(transaction):
-                        path_val = parameters.get("path")
-                        if not path_val: return
-                        
-                        warning_logger(f"Translating unsupported GQL DETACH DELETE into cascading Spanner SQL deletions for path: {path_val}")
-                        
-                        tables_with_path = [
-                            "Function", "Class", "Variable", "Parameter", 
-                            "Record", "Interface", "Struct", "Enum", "Union", 
-                            "Property", "Annotation", "Trait", "Macro",
-                            "File", "Directory", "Repository",
-                        ]
-                        
-                        for table in tables_with_path:
-                            try:
-                                transaction.execute_update(
-                                    f"DELETE FROM `{table}` WHERE STARTS_WITH(path, @path)",
-                                    params={"path": path_val}
-                                )
-                            except Exception:
-                                pass # Table might not exist or lacks standard path column
+            with self.database.snapshot() as snapshot:
+                results = snapshot.execute_sql(gql_query, params=safe_parameters)
+                # Convert to list of dicts immediately so we can close snapshot
+                formatted_results = []
+                fields = None
+                for row in results:
+                    if fields is None:
+                        fields = [f.name for f in results.fields]
                     
-                    self.database.run_in_transaction(execute_cascade_deletes)
-                    return SpannerResultWrapper([])
-                    
-                def execute_mutation(transaction):
-                    self._execute_translations(transaction, translations)
-
-                self.database.run_in_transaction(execute_mutation)
-                return SpannerResultWrapper([])
-            else:
-                gql_query, gql_params = translations
-                with self.database.snapshot() as snapshot:
-                    results = snapshot.execute_sql(gql_query, params=gql_params)
-                    # Convert to list of dicts immediately so we can close snapshot
-                    formatted_results = []
-                    fields = None
-                    for row in results:
-                        if fields is None:
-                            fields = [f.name for f in results.fields]
-                        
-                        mapped_fields = [col_map.get(f, f) for f in fields]
-                        formatted_results.append(dict(zip(mapped_fields, row)))
-                    return SpannerResultWrapper(formatted_results)
+                    mapped_fields = [col_map.get(f, f) for f in fields]
+                    formatted_results.append(dict(zip(mapped_fields, row)))
+                return SpannerResultWrapper(formatted_results)
                     
         except Exception as e:
             err_str = str(e).lower()
@@ -682,237 +652,31 @@ class SpannerSessionWrapper:
             error_logger(f"Spanner Query failed: {query[:100]}... Error: {e}")
             raise
 
-    def _translate_query(self, query: str, parameters: Dict[str, Any]) -> Tuple[Any, bool]:
-        """
-        Translates basic openCypher to Spanner GQL or a list of Spanner SQL operations.
-        Returns (translations, is_sql).
-        If is_sql=True, translations is either 'SYSTEM_DELETE_CASCADE' or List[Tuple[str, dict]].
-        """
-        # Spanner GQL restricts DML DETACH DELETE. Send it to manual cascade.
-        if "DETACH DELETE" in query.upper():
-            return "SYSTEM_DELETE_CASCADE", True
-
-        if "MERGE " in query:
-            sql_ops = []
+    def _execute_cascade_delete(self, parameters):
+        def execute_cascade_deletes(transaction):
+            path_val = parameters.get("path")
+            if not path_val: return
             
-            # 1. Node MERGE extraction
-            # e.g., MERGE (var:Label {pk: $param, ...})
-            # Regex expects optionally a variable, then a colon, then the label.
+            warning_logger(f"Translating unsupported GQL DETACH DELETE into cascading Spanner SQL deletions for path: {path_val}")
             
-            def guess_pk_name(ntype):
-                if ntype in ['Repository', 'File', 'Directory']: return 'path'
-                if ntype in ['Module']: return 'name'
-                return 'uid'
-                
-            for merge_node_match in re.finditer(r'MERGE\s+\(([a-zA-Z0-9_]+):([a-zA-Z0-9_]+)\s*\{([^}]+)\}\)', query):
-                node_var = merge_node_match.group(1)
-                node_label = merge_node_match.group(2)
-                
-                sql_params = {}
-                
-                # Handle PK mapping
-                pk_fields = merge_node_match.group(3).split(',')
-                # Sort the fields by key name so UUID generation is deterministic regardless of query order
-                sorted_match_criteria = []
-                for field in pk_fields:
-                    if ':' in field:
-                        k, v_raw = field.split(':', 1)
-                        k = k.strip()
-                        v_raw = v_raw.strip()
-                        if v_raw.startswith('$'):
-                            val = parameters.get(v_raw[1:])
-                        else:
-                            val = v_raw.strip('"\'')
-                        sql_params[k] = val
-                        sorted_match_criteria.append((k, str(val)))
-                
-                import uuid
-                if guess_pk_name(node_label) == 'uid':
-                    sorted_match_criteria.sort()
-                    hash_payload = f"{node_label}_" + "_".join([f"{k}={v}" for k, v in sorted_match_criteria])
-                    if 'uid' not in sql_params:
-                        sql_params['uid'] = str(uuid.uuid5(uuid.NAMESPACE_OID, hash_payload))
-                    parameters[f"{node_var}_pk"] = sql_params['uid']
-                else:
-                    pk_name = guess_pk_name(node_label)
-                    if pk_name in sql_params:
-                        parameters[f"{node_var}_pk"] = sql_params[pk_name]
-
-                # Associated SET statements
-                # e.g., SET var += $props
-                set_plus_match = re.search(r'SET\s+' + node_var + r'\s*\+=\s*\$([a-zA-Z0-9_]+)', query)
-                if set_plus_match:
-                    prop_name = set_plus_match.group(1)
-                    props_dict = parameters.get(prop_name, {})
-                    properties_json = {}
-                    
-                    # Standard columns we explicitly map (now correctly bounded by DDL declarations instead of a whitelist)
-                    actual_table_cols = set()
-                    node_schema_raw = NODE_TABLES.get(node_label, {"schema": ""})["schema"]
-                    for col_def in node_schema_raw.split(','):
-                        col_def = col_def.strip()
-                        if not col_def or " AS " in col_def or " properties JSON" in col_def:
-                            continue
-                        col_name = col_def.split()[0]
-                        actual_table_cols.add(col_name)
-
-                    for k, v in props_dict.items():
-                        if k in actual_table_cols and not isinstance(v, (dict, list)):
-                            sql_params[k] = v
-                        else:
-                            properties_json[k] = v
-                            
-                    if properties_json:
-                        sql_params['properties'] = properties_json
-                        
-                # e.g., SET var.prop = $val or var.prop = $val (when part of comma-separated list)
-                for set_prop_match in re.finditer(r'\b' + node_var + r'\.([a-zA-Z0-9_]+)\s*=\s*\$([a-zA-Z0-9_]+)', query):
-                    prop_k = set_prop_match.group(1)
-                    prop_v_param = set_prop_match.group(2)
-                    if prop_v_param in parameters:
-                        sql_params[prop_k] = parameters[prop_v_param]
-                        
-                sql_ops.append({
-                    "type": "node_merge",
-                    "table": node_label,
-                    "_params": sql_params
-                })
-
-            # 1.5 Extract MATCH clauses to build subqueries for edge resolving if not provided in MERGE
-            match_lookups = {}
-            for match_node in re.finditer(r'MATCH\s+\(([a-zA-Z0-9_]+):([a-zA-Z0-9_]+)\s*\{([^}]+)\}\)', query):
-                mnode_var = match_node.group(1)
-                mnode_label = match_node.group(2)
-                mpk_fields = match_node.group(3).split(',')
-                mpk_name = guess_pk_name(mnode_label)
-                
-                mwhere = []
-                for field in mpk_fields:
-                    if ':' in field:
-                        k, v_raw = field.split(':', 1)
-                        k = k.strip()
-                        v_raw = v_raw.strip()
-                        if v_raw.startswith('$'):
-                            mwhere.append([k, 'param', v_raw[1:]])
-                        else:
-                            mwhere.append([k, 'literal', v_raw])
-                if mwhere:
-                    match_lookups[mnode_var] = {"table": mnode_label, "pk": mpk_name, "criteria": mwhere}
-
-            # 2. Edge MERGE extraction
-            # e.g., MERGE (a)-[r:LABEL {props}]->(b) or MERGE (a)-[:LABEL]->(b)
-            # Regex expects optionally a variable, then a colon, then the label.
-            for merge_edge_match in re.finditer(r'MERGE\s+\(([a-zA-Z0-9_]+)\)-\[(?:([a-zA-Z0-9_]+)\s*)?:([a-zA-Z0-9_]+)(?:\s*\{([^}]+)\})?\]->\(([a-zA-Z0-9_]+)\)', query):
-                src_var = merge_edge_match.group(1)
-                edge_var = merge_edge_match.group(2) # might be None
-                edge_label = merge_edge_match.group(3)
-                edge_props_raw = merge_edge_match.group(4) or ""
-                dst_var = merge_edge_match.group(5)
-                
-                def get_node_type_from_query(var_name):
-                    m = re.search(r'\(\s*' + re.escape(var_name) + r'\s*:\s*([a-zA-Z0-9_]+)', query)
-                    if m: return m.group(1)
-                    var_mapping = {
-                        'r': 'Repository', 'f': 'File', 'd': 'Directory', 'm': 'Module',
-                        'c': 'Class', 'fn': 'Function', 'caller': 'Function', 'called': 'Function',
-                        'final_target': 'Function', 'final_caller': 'Function', 'child': 'Class', 'parent': 'Class',
-                        'p': 'Parameter', 'mod': 'Module', 'outer': 'Module', 'inner': 'Module',
-                        'iface': 'Interface', 'outer_fn': 'Function'
-                    }
-                    return var_mapping.get(var_name, var_name.capitalize())
-
-                src_type = get_node_type_from_query(src_var)
-                dst_type = get_node_type_from_query(dst_var)
-                
-                src_pk = guess_pk_name(src_type)
-                dst_pk = guess_pk_name(dst_type)
-
-                # Fetch resolved ID from parameters or fallback to subqueries generated by MATCH
-                src_val_direct = parameters.get(f"{src_var}_pk", parameters.get(src_pk))
-                if src_val_direct:
-                    src_val_sql = f"@{src_var}_pk" if f"{src_var}_pk" in parameters else f"@{src_pk}"
-                    src_val_hash = str(src_val_direct)
-                elif src_var in match_lookups:
-                    src_val_sql = match_lookups[src_var]
-                    src_val_hash = f"match_{src_var}"
-                else:
-                    src_val_sql = f"'dummy_{src_var}'"
-                    src_val_hash = f"dummy_{src_var}"
-
-                dst_val_direct = parameters.get(f"{dst_var}_pk", parameters.get(dst_pk))
-                if dst_val_direct:
-                    dst_val_sql = f"@{dst_var}_pk" if f"{dst_var}_pk" in parameters else f"@{dst_pk}"
-                    dst_val_hash = str(dst_val_direct)
-                elif dst_var in match_lookups:
-                    dst_val_sql = match_lookups[dst_var]
-                    dst_val_hash = f"match_{dst_var}"
-                else:
-                    dst_val_sql = f"'dummy_{dst_var}'"
-                    dst_val_hash = f"dummy_{dst_var}"
-                
-                import uuid
-                # Use src_val_hash / dst_val_hash to maintain determinism for uuid.
-                # If these edges are re-created via MATCH, clear_repository will have cleaned up the old ones so unique keys don't strictly collide.
-                edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{edge_label}_{src_val_hash}_{dst_val_hash}_{edge_props_raw}"))
-
-                edge_sql_params = {}
-                if edge_props_raw:
-                    for field in edge_props_raw.split(','):
-                        if ':' in field:
-                            k, v_raw = field.split(':', 1)
-                            k = k.strip()
-                            target_param = v_raw.strip()[1:]
-                            if target_param in parameters:
-                                edge_sql_params[k] = parameters[target_param]
-                                
-                if edge_var:
-                    set_edge_plus_match = re.search(r'SET\s+' + edge_var + r'\s*\+=\s*\$([a-zA-Z0-9_]+)', query)
-                    if set_edge_plus_match:
-                        prop_name = set_edge_plus_match.group(1)
-                        props_dict = parameters.get(prop_name, {})
-                        for k, v in props_dict.items():
-                            edge_sql_params[k] = v
-
-                actual_edge_cols = set(["id", "src_id", "dst_id"])
-                edge_props_raw_ddl = EDGE_TABLES.get(edge_label, {"properties": ""})["properties"]
-                for col_def in edge_props_raw_ddl.split(','):
-                    col_def = col_def.strip()
-                    if not col_def or " AS " in col_def or " properties JSON" in col_def:
-                        continue
-                    col_name = col_def.split()[0]
-                    actual_edge_cols.add(col_name)
-
-                final_edge_sql_params = {}
-                edge_properties_json = {}
-                for k, v in edge_sql_params.items():
-                    if k in actual_edge_cols and not isinstance(v, (dict, list)):
-                        final_edge_sql_params[k] = v
-                    else:
-                        edge_properties_json[k] = v
-                        
-                if edge_properties_json:
-                    final_edge_sql_params["properties"] = edge_properties_json
-
-                sql_ops.append({
-                    "type": "edge_merge",
-                    "sql_params": final_edge_sql_params,
-                    "edge_label": edge_label,
-                    "edge_props_raw": edge_props_raw,
-                    "src_var": src_var,
-                    "dst_var": dst_var,
-                    "src_pk": src_pk,
-                    "dst_pk": dst_pk,
-                    "match_lookups": match_lookups,
-                    "match_query_prefix": query[:merge_edge_match.start()],
-                    "original_parameters": parameters
-                })
-
-            if sql_ops:
-                return sql_ops, True
-
-        # Pure GQL fallback for reads (MATCH)
-        gql_query, safe_parameters = self._format_gql(query, parameters)
-        return (gql_query, safe_parameters), False
+            tables_with_path = [
+                "Function", "Class", "Variable", "Parameter", 
+                "Record", "Interface", "Struct", "Enum", "Union", 
+                "Property", "Annotation", "Trait", "Macro",
+                "File", "Directory", "Repository",
+            ]
+            
+            for table in tables_with_path:
+                try:
+                    transaction.execute_update(
+                        f"DELETE FROM `{table}` WHERE STARTS_WITH(path, @path)",
+                        params={"path": path_val}
+                    )
+                except Exception:
+                    pass # Table might not exist or lacks standard path column
+        
+        self.database.run_in_transaction(execute_cascade_deletes)
+        return SpannerResultWrapper([])
 
 class SpannerDriverWrapper:
     def __init__(self, database_obj, graph_name):
