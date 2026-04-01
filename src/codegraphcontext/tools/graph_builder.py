@@ -396,7 +396,7 @@ class GraphBuilder:
                 session.run_batch([payload])
 
     # First pass to add file and its contents
-    def add_file_to_graph(self, file_data: Dict, repo_name: str, imports_map: dict):
+    def add_file_to_graph(self, file_data: Dict, repo_name: str, imports_map: dict, global_batch: list = None):
         calls_count = len(file_data.get('function_calls', []))
         debug_log(f"Executing add_file_to_graph for {file_data.get('path', 'unknown')} - Calls found: {calls_count}")
         """Adds a file and its contents within a single, unified session."""
@@ -412,13 +412,21 @@ class GraphBuilder:
         file_name = Path(relative_path).name
         is_dependency = file_data.get('is_dependency', False)
 
-        with self.driver.session() as session:
-            batch_support = hasattr(session, 'run_batch')
-            batch_queries = []
+        import contextlib
+        @contextlib.contextmanager
+        def get_session():
+            if global_batch is not None:
+                yield None
+            else:
+                with self.driver.session() as s:
+                    yield s
+
+        with get_session() as session:
+            batch_support = True
+            batch_queries = global_batch if global_batch is not None else []
 
             def execute_or_queue(payload: dict):
-                if batch_support:
-                    batch_queries.append(payload)
+                batch_queries.append(payload)
 
             execute_or_queue({
                 "type": "node_merge",
@@ -722,7 +730,7 @@ class GraphBuilder:
                     "edge_props_raw": ""
                 })
 
-            if batch_support and batch_queries:
+            if global_batch is None and session and batch_queries:
                 session.run_batch(batch_queries)
                 batch_queries.clear()
 
@@ -1955,41 +1963,60 @@ class GraphBuilder:
 
             processed_count = 0
             import time
-            for file in files:
-                if file.is_file():
-                    if job_id:
-                        self.job_manager.update_job(job_id, current_file=str(file))
-                    repo_path = path.resolve() if path.is_dir() else file.parent.resolve()
-                    
-                    file_data = self.parse_file(repo_path, file, is_dependency)
-                    
-                    rewrite_paths(file_data, repo_path, virtual_repo_name)
-                    
-                    # Previously only files with supported extensions were indexed.
-                    # Updated to include all files so that unsupported file types
-                    # can still be represented as minimal File nodes in the graph.
-                    if "error" not in file_data:
-                        try:
-                            self.add_file_to_graph(file_data, repo_name, imports_map)
-                        except Exception as file_err:
-                            # Re-raise with the offending file path so the user
-                            # can identify which source file triggered the error.
-                            raise RuntimeError(
-                                f"{file_err} (while indexing file: {file})"
-                            ) from file_err
-                        all_file_data.append(file_data)
+            global_batch = []
+            
+            with self.driver.session() as session:
+                for file in files:
+                    if file.is_file():
+                        if job_id:
+                            self.job_manager.update_job(job_id, current_file=str(file))
+                        repo_path = path.resolve() if path.is_dir() else file.parent.resolve()
+                        
+                        file_data = self.parse_file(repo_path, file, is_dependency)
+                        
+                        rewrite_paths(file_data, repo_path, virtual_repo_name)
+                        
+                        # Previously only files with supported extensions were indexed.
+                        # Updated to include all files so that unsupported file types
+                        # can still be represented as minimal File nodes in the graph.
+                        if "error" not in file_data:
+                            try:
+                                self.add_file_to_graph(file_data, repo_name, imports_map, global_batch=global_batch)
+                            except Exception as file_err:
+                                # Re-raise with the offending file path so the user
+                                # can identify which source file triggered the error.
+                                raise RuntimeError(
+                                    f"{file_err} (while indexing file: {file})"
+                                ) from file_err
+                            all_file_data.append(file_data)
+    
+                        # Previously only files with supported extensions were indexed.
+                        # Updated to include all files so that unsupported file types
+                        # can still be represented as minimal File nodes in the graph.
+                        else:
+                            # create minimal node if parser not available
+                            self.add_minimal_file_node(file, repo_path, virtual_repo_name, is_dependency, global_batch=global_batch)
+                        processed_count += 1
+                        
+                        if len(global_batch) >= 1000:
+                            if hasattr(session, 'run_batch'):
+                                session.run_batch(global_batch)
+                            else:
+                                for query in global_batch:
+                                    session.run(query)
+                            global_batch.clear()
+    
+                        if job_id:
+                            self.job_manager.update_job(job_id, processed_files=processed_count)
+                        await asyncio.sleep(0.01)
 
-                    # Previously only files with supported extensions were indexed.
-                    # Updated to include all files so that unsupported file types
-                    # can still be represented as minimal File nodes in the graph.
+                if global_batch:
+                    if hasattr(session, 'run_batch'):
+                        session.run_batch(global_batch)
                     else:
-                        # create minimal node if parser not available
-                        self.add_minimal_file_node(file, repo_path, virtual_repo_name, is_dependency)
-                    processed_count += 1
-
-                    if job_id:
-                        self.job_manager.update_job(job_id, processed_files=processed_count)
-                    await asyncio.sleep(0.01)
+                        for query in global_batch:
+                            session.run(query)
+                    global_batch.clear()
 
             self._create_all_inheritance_links(all_file_data, imports_map)
             self._create_all_function_calls(all_file_data, imports_map)
@@ -2013,10 +2040,12 @@ class GraphBuilder:
     # Create a minimal File node for unsupported file types.
     # These files do not contain parsed entities but should still
     # appear in the repository graph as requested in issue #707.
-    def add_minimal_file_node(self, file_path: Path, repo_path: Path, virtual_repo_name: str, is_dependency: bool = False):
-
+    def add_minimal_file_node(self, file_path: Path, repo_path: Path, virtual_repo_name: str, is_dependency: bool = False, global_batch: list = None):
+        """Adds a minimal representation of a file (e.g., Markdown, Makefiles, images)
+           to the graph so its parent folders and path are structurally captured even
+           if no deep AST parsing is available."""
         file_uri = to_global_uri(file_path, repo_path, virtual_repo_name)
-        repo_uri = virtual_repo_name
+        repo_uri = to_global_uri(repo_path, repo_path, virtual_repo_name)
         
         if file_uri.startswith(repo_uri + "$"):
             relative_path = file_uri[len(repo_uri)+1:]
@@ -2025,9 +2054,24 @@ class GraphBuilder:
             
         file_name = Path(relative_path).name
         
-        with self.driver.session() as session:
+        import contextlib
+        @contextlib.contextmanager
+        def get_session():
+            if global_batch is not None:
+                yield None
+            else:
+                with self.driver.session() as s:
+                    yield s
 
-            session.run({
+        with get_session() as session:
+            batch_queries = global_batch if global_batch is not None else []
+            def execute_or_queue(payload: dict):
+                if session is not None:
+                    session.run(payload)
+                else:
+                    batch_queries.append(payload)
+
+            execute_or_queue({
                 "type": "node_merge",
                 "table": "Repository",
                 "_params": {
@@ -2036,7 +2080,7 @@ class GraphBuilder:
                 }
             })
 
-            session.run({
+            execute_or_queue({
                 "type": "node_merge",
                 "table": "File",
                 "_params": {
@@ -2047,7 +2091,7 @@ class GraphBuilder:
                 }
             })
 
-            session.run({
+            execute_or_queue({
                 "type": "edge_merge",
                 "edge_label": "CONTAINS",
                 "sql_params": {
@@ -2088,13 +2132,13 @@ class GraphBuilder:
                 else:
                     current_path_str = f"{parent_path}/{part}"
                 
-                session.run({
+                execute_or_queue({
                     "type": "node_merge",
                     "table": "Directory",
                     "_params": {"path": current_path_str, "name": part}
                 })
 
-                session.run({
+                execute_or_queue({
                     "type": "edge_merge",
                     "edge_label": "CONTAINS",
                     "sql_params": {
@@ -2127,7 +2171,7 @@ class GraphBuilder:
                 parent_label = 'Directory'
 
             # Finally, connect the last directory to the file
-            session.run({
+            execute_or_queue({
                 "type": "edge_merge",
                 "edge_label": "CONTAINS",
                 "sql_params": {
@@ -2155,3 +2199,11 @@ class GraphBuilder:
                 "dst_pk": "path",
                 "edge_props_raw": ""
             })
+
+            if global_batch is None and session and batch_queries:
+                if hasattr(session, 'run_batch'):
+                    session.run_batch(batch_queries)
+                else:
+                    for query in batch_queries:
+                        session.run(query)
+                batch_queries.clear()
