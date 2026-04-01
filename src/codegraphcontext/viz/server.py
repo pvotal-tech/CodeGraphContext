@@ -82,7 +82,7 @@ async def get_graph(repo_path: Optional[str] = None, gql_query: Optional[str] = 
                 repo_path = str(Path(repo_path).resolve())
                 print(f"DEBUG: Fetching subgraph for: {repo_path}", flush=True)
                 query = """
-                MATCH (r:Repository {path: $repo_path})
+                MATCH (r:Repository {path: @repo_path})
                 OPTIONAL MATCH (r)-[:CONTAINS*0..]->(n)
                 WITH DISTINCT n
                 WHERE n IS NOT NULL

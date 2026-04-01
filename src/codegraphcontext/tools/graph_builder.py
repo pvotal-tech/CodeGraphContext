@@ -937,7 +937,7 @@ class GraphBuilder:
                     "dst_var": "called",
                     "src_pk": "uid",
                     "dst_pk": "uid",
-                    "edge_props_raw": "line_number: $line_number, args: $args, full_call_name: $full_call_name"
+                    "edge_props_raw": "line_number: @line_number, args: @args, full_call_name: @full_call_name"
                 }
 
                 if caller_pk:
@@ -1006,7 +1006,7 @@ class GraphBuilder:
                     "dst_var": "called",
                     "src_pk": "path",
                     "dst_pk": "uid",
-                    "edge_props_raw": "line_number: $line_number, args: $args, full_call_name: $full_call_name"
+                    "edge_props_raw": "line_number: @line_number, args: @args, full_call_name: @full_call_name"
                 }
 
                 if resolved_path:
@@ -1307,7 +1307,7 @@ class GraphBuilder:
         with self.driver.session() as session:
             try:
                 parents_res = session.run("""
-                    MATCH (f:File {path: $path})<-[:CONTAINS*]-(d:Directory)
+                    MATCH (f:File {path: @path})<-[:CONTAINS*]-(d:Directory)
                     RETURN d.path as path ORDER BY d.path DESC
                 """, path=file_path_str)
                 parent_paths = [record["path"] for record in parents_res]
@@ -1330,7 +1330,7 @@ class GraphBuilder:
 
             session.run(
                 """
-                MATCH (f:File {path: $path})
+                MATCH (f:File {path: @path})
                 OPTIONAL MATCH (f)-[:CONTAINS]->(element)
                 DETACH DELETE f, element
                 """,
@@ -1340,7 +1340,7 @@ class GraphBuilder:
 
             for path in parent_paths:
                 session.run("""
-                    MATCH (d:Directory {path: $path})
+                    MATCH (d:Directory {path: @path})
                     WHERE NOT (d)-[:CONTAINS]->()
                     DETACH DELETE d
                 """, path=path)
@@ -1357,12 +1357,12 @@ class GraphBuilder:
             
         with self.driver.session() as session:
             # Check if it exists
-            result = session.run("MATCH (r:Repository {path: $path}) RETURN count(r) as cnt", path=repo_path_str).single()
+            result = session.run("MATCH (r:Repository {path: @path}) RETURN count(r) as cnt", path=repo_path_str).single()
             if not result or result["cnt"] == 0:
                 warning_logger(f"Attempted to delete non-existent repository: {repo_path_str}")
                 return False
 
-            session.run("""MATCH (r:Repository {path: $path})
+            session.run("""MATCH (r:Repository {path: @path})
                           OPTIONAL MATCH (r)-[:CONTAINS*]->(e)
                           DETACH DELETE r, e""", path=repo_path_str)
             info_logger(f"Deleted repository and its contents from graph: {repo_path_str}")
@@ -1608,9 +1608,9 @@ class GraphBuilder:
                         try:
                             # Use line numbers for precise matching in case of duplicates
                             session.run("""
-                                MATCH (caller:Function {name: $caller_name, path: $caller_file, line_number: $caller_line})
-                                MATCH (callee:Function {name: $callee_name, path: $callee_file, line_number: $callee_line})
-                                MERGE (caller)-[:CALLS {line_number: $ref_line, source: 'scip'}]->(callee)
+                                MATCH (caller:Function {name: @caller_name, path: @caller_file, line_number: @caller_line})
+                                MATCH (callee:Function {name: @callee_name, path: @callee_file, line_number: @callee_line})
+                                MERGE (caller)-[:CALLS {line_number: @ref_line, source: 'scip'}]->(callee)
                             """,
                             caller_name=self._name_from_symbol(edge["caller_symbol"]),
                             caller_file=edge["caller_file"],
@@ -1861,7 +1861,7 @@ class GraphBuilder:
                         current_commit = repo.head.commit.hexsha
                         with self.driver.session() as session:
                             try:
-                                result = session.run("MATCH (r:Repository {path: $path}) RETURN r.last_indexed_commit as commit", path=virtual_repo_name).single()
+                                result = session.run("MATCH (r:Repository {path: @path}) RETURN r.last_indexed_commit as commit", path=virtual_repo_name).single()
                                 last_indexed_commit = result['commit'] if result else None
                             except Exception as e:
                                 print(f"[CGC Git] Fallback to full sync. Spanner graph missing 'last_indexed_commit' property. Error: {str(e).splitlines()[0]}", flush=True)

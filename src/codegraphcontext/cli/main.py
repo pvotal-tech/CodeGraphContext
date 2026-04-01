@@ -1180,7 +1180,7 @@ def find_by_name(
         elif type.lower() == 'file':
             # Quick query for file
             with db_manager.get_driver().session() as session:
-                res = session.run("MATCH (n:File) WHERE n.name = $name RETURN n.name as name, n.path as path, n.is_dependency as is_dependency", name=name)
+                res = session.run("MATCH (n:File) WHERE n.name = @name RETURN n.name as name, n.path as path, n.is_dependency as is_dependency", name=name)
                 results = [dict(record) for record in res]
                 for r in results: r['type'] = 'File'
         
@@ -1243,7 +1243,7 @@ def find_by_pattern(
             if not case_sensitive:
                 query = """
                     MATCH (n)
-                    WHERE (n:Function OR n:Class OR n:Module OR n:Variable) AND toLower(n.name) CONTAINS toLower($pattern)
+                    WHERE (n:Function OR n:Class OR n:Module OR n:Variable) AND toLower(n.name) STRPOS(LOWER(n.name), LOWER(@pattern)) > 0
                     RETURN 
                         labels(n)[0] as type,
                         n.name as name,
@@ -1256,7 +1256,7 @@ def find_by_pattern(
             else:
                  query = """
                     MATCH (n)
-                    WHERE (n:Function OR n:Class OR n:Module OR n:Variable) AND n.name CONTAINS $pattern
+                    WHERE (n:Function OR n:Class OR n:Module OR n:Variable) AND n.name STRPOS(n.name, @pattern) > 0
                     RETURN 
                         labels(n)[0] as type,
                         n.name as name,
