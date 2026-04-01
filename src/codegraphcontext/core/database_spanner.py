@@ -457,14 +457,28 @@ class SpannerSessionWrapper:
         return gql_query, safe_parameters
 
     def _execute_translations(self, transaction, translations):
+        import google.cloud.spanner as spanner
+        import uuid
+        import json
+        import re
+
+        def get_ptypes(p):
+            pt = {}
+            for k, v in p.items():
+                if isinstance(v, str): pt[k] = spanner.param_types.STRING
+                elif isinstance(v, bool): pt[k] = spanner.param_types.BOOL
+                elif isinstance(v, int): pt[k] = spanner.param_types.INT64
+                elif isinstance(v, float): pt[k] = spanner.param_types.FLOAT64
+                elif isinstance(v, list): pt[k] = spanner.param_types.Array(spanner.param_types.STRING)
+            return pt
+
+        batch_statements = []
+
         for sql_op in translations:
             if isinstance(sql_op, tuple):
                 sql_query, sql_params = sql_op
-                transaction.execute_update(sql_query, params=sql_params)
+                batch_statements.append((sql_query, sql_params, get_ptypes(sql_params)))
             elif isinstance(sql_op, dict) and sql_op.get("type") == "edge_merge":
-                import uuid
-                import json
-                import re
                 prefix = sql_op["match_query_prefix"]
                 src_var, dst_var = sql_op["src_var"], sql_op["dst_var"]
                 src_pk, dst_pk = sql_op["src_pk"], sql_op["dst_pk"]
@@ -500,7 +514,7 @@ class SpannerSessionWrapper:
                         # Hack to print cumulative time occasionally
                         if not hasattr(self, '_execute_sql_count'): self._execute_sql_count = 0
                         self._execute_sql_count += 1
-                        if self._execute_sql_count % 1000 == 0:
+                        if True:
                             print(f"[Spanner Performance] Cumulative execute_sql lookups: {self._execute_sql_count} calls, total time: {self._execute_sql_time:.2f}s", flush=True)
                         
                 # Fallback if logic is a pure MERGE without MATCH sequence or no rows found
@@ -533,7 +547,12 @@ class SpannerSessionWrapper:
                             insert_params[c] = v
                     
                     sql = f"INSERT OR UPDATE `{edge_label}` ({', '.join(cols)}) VALUES ({', '.join(vals)})"
-                    transaction.execute_update(sql, params=insert_params)
+                    batch_statements.append((sql, insert_params, get_ptypes(insert_params)))
+
+        if batch_statements:
+            for i in range(0, len(batch_statements), 50):
+                chunk = batch_statements[i:i+50]
+                transaction.batch_update(chunk)
 
     def run_batch(self, batch_queries: list):
         """Executes a list of (query, parameters) tuples in a single Spanner transaction."""
