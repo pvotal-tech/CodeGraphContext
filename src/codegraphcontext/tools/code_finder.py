@@ -289,7 +289,7 @@ class CodeFinder:
                     results = result.data()
             else:
                 result = session.run(f"""
-                    MATCH (caller:Function)-[call:CALLS]->(target:Function {{name: @function_name}})
+                    MATCH (caller:Function|Class|File)-[call:CALLS]->(target:Function {{name: @function_name}})
                     WHERE 1=1 {repo_filter}
                     OPTIONAL MATCH (caller_file:File)-[:`CONTAINS`]->(caller)
                     RETURN
