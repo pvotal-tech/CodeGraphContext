@@ -1909,7 +1909,11 @@ class GraphBuilder:
                         # Set current commit
                         with self.driver.session() as session:
                             try:
-                                session.run("MERGE (r:Repository {path: $path}) SET r.last_indexed_commit = $commit", path=virtual_repo_name, commit=current_commit)
+                                session.run({
+                                    "type": "node_merge",
+                                    "table": "Repository",
+                                    "_params": {"path": virtual_repo_name, "last_indexed_commit": current_commit}
+                                })
                             except Exception as e:
                                 pass # Spanner Schema does not have last_indexed_commit yet
                 except git.exc.InvalidGitRepositoryError as e:
@@ -2022,27 +2026,55 @@ class GraphBuilder:
         
         with self.driver.session() as session:
 
-            session.run(
-                """
-                MERGE (r:Repository {path: $repo_path})
-                SET r.name = $repo_name
-                """,
-                repo_path=repo_uri,
-                repo_name=virtual_repo_name
-            )
+            session.run({
+                "type": "node_merge",
+                "table": "Repository",
+                "_params": {
+                    "path": repo_uri,
+                    "name": virtual_repo_name
+                }
+            })
 
-            session.run(
-                """
-                MERGE (f:File {path: $file_path})
-                SET f.name = $file_name,
-                    f.relative_path = $relative_path,
-                    f.is_dependency = $is_dependency
-                """,
-                file_path=file_uri,
-                file_name=file_name,
-                relative_path=relative_path,
-                is_dependency=is_dependency
-            )
+            session.run({
+                "type": "node_merge",
+                "table": "File",
+                "_params": {
+                    "path": file_uri,
+                    "name": file_name,
+                    "relative_path": relative_path,
+                    "is_dependency": is_dependency,
+                    "file_type": "source"
+                }
+            })
+
+            session.run({
+                "type": "edge_merge",
+                "edge_label": "CONTAINS",
+                "sql_params": {
+                    "id": str(uuid.uuid5(uuid.NAMESPACE_OID, f"CONTAINS_{repo_uri}_{file_uri}"))
+                },
+                "match_lookups": {
+                    "repo": {
+                        "table": "Repository",
+                        "pk": "uid",
+                        "criteria": [["path", "param", "repo_path"]]
+                    },
+                    "file": {
+                        "table": "File",
+                        "pk": "uid",
+                        "criteria": [["path", "param", "file_path"]]
+                    }
+                },
+                "original_parameters": {
+                    "repo_path": repo_uri,
+                    "file_path": file_uri
+                },
+                "src_var": "repo",
+                "dst_var": "file",
+                "src_pk": "uid",
+                "dst_pk": "uid",
+                "edge_props_raw": ""
+            })
 
             # Establish directory structure uniformly using URIs
             parent_path = repo_uri
@@ -2056,18 +2088,70 @@ class GraphBuilder:
                 else:
                     current_path_str = f"{parent_path}/{part}"
                 
-                session.run(f"""
-                    MATCH (p:{parent_label} {{path: $parent_path}})
-                    MERGE (d:Directory {{path: $current_path}})
-                    SET d.name = $part
-                    MERGE (p)-[:CONTAINS]->(d)
-                """, parent_path=parent_path, current_path=current_path_str, part=part)
+                session.run({
+                    "type": "node_merge",
+                    "table": "Directory",
+                    "_params": {"path": current_path_str, "name": part}
+                })
+
+                session.run({
+                    "type": "edge_merge",
+                    "edge_label": "CONTAINS",
+                    "sql_params": {
+                        "id": str(uuid.uuid5(uuid.NAMESPACE_OID, f"CONTAINS_{parent_path}_{current_path_str}"))
+                    },
+                    "match_lookups": {
+                        "parent": {
+                            "table": parent_label,
+                            "pk": "uid",
+                            "criteria": [["path", "param", "parent_path"]]
+                        },
+                        "child": {
+                            "table": "Directory",
+                            "pk": "uid",
+                            "criteria": [["path", "param", "current_path"]]
+                        }
+                    },
+                    "original_parameters": {
+                        "parent_path": parent_path,
+                        "current_path": current_path_str
+                    },
+                    "src_var": "parent",
+                    "dst_var": "child",
+                    "src_pk": "uid",
+                    "dst_pk": "uid",
+                    "edge_props_raw": ""
+                })
 
                 parent_path = current_path_str
                 parent_label = 'Directory'
 
-            session.run(f"""
-                MATCH (p:{parent_label} {{path: $parent_path}})
-                MATCH (f:File {{path: $file_path}})
-                MERGE (p)-[:CONTAINS]->(f)
-            """, parent_path=parent_path, file_path=file_uri)
+            # Finally, connect the last directory to the file
+            session.run({
+                "type": "edge_merge",
+                "edge_label": "CONTAINS",
+                "sql_params": {
+                    "id": str(uuid.uuid5(uuid.NAMESPACE_OID, f"CONTAINS_{parent_path}_{file_uri}"))
+                },
+                "match_lookups": {
+                    "parent": {
+                        "table": parent_label,
+                        "pk": "uid",
+                        "criteria": [["path", "param", "parent_path"]]
+                    },
+                    "child": {
+                        "table": "File",
+                        "pk": "uid",
+                        "criteria": [["path", "param", "file_path"]]
+                    }
+                },
+                "original_parameters": {
+                    "parent_path": parent_path,
+                    "file_path": file_uri
+                },
+                "src_var": "parent",
+                "dst_var": "child",
+                "src_pk": "uid",
+                "dst_pk": "uid",
+                "edge_props_raw": ""
+            })
