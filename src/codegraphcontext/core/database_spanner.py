@@ -616,6 +616,10 @@ class SpannerSessionWrapper:
             print(f"[Spanner Batch] Transaction completed in {end_time - start_time:.2f} seconds.", flush=True)
 
     def run(self, query, **parameters):
+        if isinstance(query, dict):
+            self.run_batch([query])
+            return SpannerResultWrapper([])
+            
         # 0. Alias the return clause to ensure GQL compliance
         aliased_query, col_map = _auto_alias_return_clause(query)
 
