@@ -526,52 +526,94 @@ class SpannerSessionWrapper:
         # PASS 2: Mutation Construction
         mutations_by_table = {}
         
+        def get_insertable_cols(table_name, is_edge=False):
+            if is_edge:
+                schema_str = EDGE_TABLES.get(table_name, {}).get("properties", "")
+                cols = {"id", "src_id", "dst_id"}
+            else:
+                schema_str = NODE_TABLES.get(table_name, {}).get("schema", "")
+                cols = set()
+            for part in schema_str.split(','):
+                part = part.strip()
+                if not part or " AS " in part.upper(): continue
+                cols.add(part.split()[0])
+            return cols
+        
         for op in node_merges:
             table = op["table"]
             params = op["_params"]
+            allowed_cols = get_insertable_cols(table, False)
+            
+            final_params = {}
+            props_json = {}
+            existing_props = params.get("properties", {})
+            if isinstance(existing_props, dict):
+                props_json.update(existing_props)
+                
+            for k, v in params.items():
+                if k == "properties": continue
+                if k in allowed_cols:
+                    final_params[k] = v
+                else:
+                    props_json[k] = v
+                    
+            if props_json and "properties" in allowed_cols:
+                final_params["properties"] = props_json
+                
             mutations_by_table.setdefault(table, []).append({
-                "cols": tuple(params.keys()), 
-                "vals": [JsonObject(v) if isinstance(v, dict) else v for v in params.values()]
+                "cols": tuple(final_params.keys()), 
+                "vals": [JsonObject(v) if isinstance(v, dict) else v for v in final_params.values()]
             })
 
         for idx, op in enumerate(edge_merges):
             table = op["edge_label"]
-            if "original_parameters" not in op:
-                cols_list = []
-                vals_list = []
-                for k, v in op["sql_params"].items():
-                    cols_list.append(k)
-                    vals_list.append(JsonObject(v) if isinstance(v, dict) else v)
-                mutations_by_table.setdefault(table, []).append({"cols": tuple(cols_list), "vals": vals_list})
-                continue
-                
-            params = op["original_parameters"]
-            
-            src_val = op["_src_val"]
-            dst_val = op["_dst_val"]
-            
-            if (idx, "src") in lookup_mappings:
-                key, mval = lookup_mappings[(idx, "src")]
-                src_val = resolved_ids.get((key[0], key[2], mval)) or src_val
-                
-            if (idx, "dst") in lookup_mappings:
-                key, mval = lookup_mappings[(idx, "dst")]
-                dst_val = resolved_ids.get((key[0], key[2], mval)) or dst_val
-            
-            final_src_val = src_val or params.get(op["src_pk"]) or f"dummy_{op['src_var']}"
-            final_dst_val = dst_val or params.get(op["dst_pk"]) or f"dummy_{op['dst_var']}"
-            
-            edge_props_raw = op["edge_props_raw"]
-            edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{table}_{final_src_val}_{final_dst_val}_{edge_props_raw}"))
+            allowed_cols = get_insertable_cols(table, True)
             
             final_sql_params = op["sql_params"].copy()
-            final_sql_params["id"] = edge_id
-            final_sql_params["src_id"] = final_src_val
-            final_sql_params["dst_id"] = final_dst_val
             
+            if "original_parameters" in op:
+                params = op["original_parameters"]
+                
+                src_val = op["_src_val"]
+                dst_val = op["_dst_val"]
+                
+                if (idx, "src") in lookup_mappings:
+                    key, mval = lookup_mappings[(idx, "src")]
+                    src_val = resolved_ids.get((key[0], key[2], mval)) or src_val
+                    
+                if (idx, "dst") in lookup_mappings:
+                    key, mval = lookup_mappings[(idx, "dst")]
+                    dst_val = resolved_ids.get((key[0], key[2], mval)) or dst_val
+                
+                final_src_val = src_val or params.get(op["src_pk"]) or f"dummy_{op['src_var']}"
+                final_dst_val = dst_val or params.get(op["dst_pk"]) or f"dummy_{op['dst_var']}"
+                
+                edge_props_raw = op["edge_props_raw"]
+                edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{table}_{final_src_val}_{final_dst_val}_{edge_props_raw}"))
+                
+                final_sql_params["id"] = edge_id
+                final_sql_params["src_id"] = final_src_val
+                final_sql_params["dst_id"] = final_dst_val
+
+            final_params = {}
+            props_json = {}
+            existing_props = final_sql_params.get("properties", {})
+            if isinstance(existing_props, dict):
+                props_json.update(existing_props)
+                
+            for k, v in final_sql_params.items():
+                if k == "properties": continue
+                if k in allowed_cols:
+                    final_params[k] = v
+                else:
+                    props_json[k] = v
+                    
+            if props_json and "properties" in allowed_cols:
+                final_params["properties"] = props_json
+                
             cols_list = []
             vals_list = []
-            for k, v in final_sql_params.items():
+            for k, v in final_params.items():
                 cols_list.append(k)
                 vals_list.append(JsonObject(v) if isinstance(v, dict) else v)
 
