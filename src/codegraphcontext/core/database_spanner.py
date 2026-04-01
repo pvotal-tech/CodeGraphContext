@@ -558,8 +558,8 @@ class SpannerSessionWrapper:
                     key, mval = lookup_mappings[(idx, "dst")]
                     dst_val = resolved_ids.get((key[0], key[2], mval)) or dst_val
                 
-                final_src_val = src_val or params.get(op["src_pk"]) or f"dummy_{op['src_var']}"
-                final_dst_val = dst_val or params.get(op["dst_pk"]) or f"dummy_{op['dst_var']}"
+                final_src_val = src_val or params.get(op["src_pk"]) or final_sql_params.get("src_id") or f"dummy_{op['src_var']}"
+                final_dst_val = dst_val or params.get(op["dst_pk"]) or final_sql_params.get("dst_id") or f"dummy_{op['dst_var']}"
                 
                 edge_props_raw = op["edge_props_raw"]
                 edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{table}_{final_src_val}_{final_dst_val}_{edge_props_raw}"))

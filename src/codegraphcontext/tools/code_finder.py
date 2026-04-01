@@ -250,8 +250,8 @@ class CodeFinder:
             repo_filter = "AND STARTS_WITH(caller.path, @repo_path)" if repo_path else ""
             if path:
                 result = session.run(f"""
-                    MATCH (caller)-[call:CALLS]->(target:Function {{name: @function_name, path: @path}})
-                    WHERE (caller:Function OR caller:Class OR caller:File) {repo_filter}
+                    MATCH (caller:Function|Class|File)-[call:CALLS]->(target:Function {{name: @function_name, path: @path}})
+                    WHERE 1=1 {repo_filter}
                     OPTIONAL MATCH (caller_file:File)-[:`CONTAINS`]->(caller)
                     RETURN
                         caller.name as caller_function,
@@ -270,8 +270,8 @@ class CodeFinder:
                 results = result.data()
                 if not results:
                     result = session.run(f"""
-                        MATCH (caller)-[call:CALLS]->(target:Function {{name: @function_name}})
-                        WHERE (caller:Function OR caller:Class OR caller:File) {repo_filter}
+                        MATCH (caller:Function|Class|File)-[call:CALLS]->(target:Function {{name: @function_name}})
+                        WHERE 1=1 {repo_filter}
                         OPTIONAL MATCH (caller_file:File)-[:`CONTAINS`]->(caller)
                         RETURN
                             caller.name as caller_function,
@@ -312,13 +312,19 @@ class CodeFinder:
     def what_does_function_call(self, function_name: str, path: Optional[str] = None, repo_path: Optional[str] = None) -> List[Dict]:
         """Find what functions a specific function calls using CALLS relationships"""
         with self.driver.session() as session:
+            repo_filter_sql = "WHERE STARTS_WITH(called.path, @repo_path)" if repo_path else ""
+            params = {"function_name": function_name}
+            if repo_path:
+                params["repo_path"] = repo_path
+                
             if path:
                 # Convert path to absolute path
                 absolute_file_path = str(Path(path).resolve())
+                params["absolute_file_path"] = absolute_file_path
                 result = session.run(f"""
                     MATCH (caller:Function {{name: @function_name, path: @absolute_file_path}})
                     MATCH (caller)-[call:CALLS]->(called:Function)
-                    WHERE STARTS_WITH(called.path, @repo_path) OR @repo_path IS NULL
+                    {repo_filter_sql}
                     OPTIONAL MATCH (called_file:File)-[:`CONTAINS`]->(called)
                     RETURN
                         called.name as called_function,
@@ -331,11 +337,11 @@ class CodeFinder:
                         call.full_call_name as full_call_name
                     ORDER BY called_is_dependency ASC, called_function
                     LIMIT 20
-                """, function_name=function_name, absolute_file_path=absolute_file_path, repo_path=repo_path)
+                """, **params)
             else:
                 result = session.run(f"""
                     MATCH (caller:Function {{name: @function_name}})-[call:CALLS]->(called:Function)
-                    WHERE STARTS_WITH(called.path, @repo_path) OR @repo_path IS NULL
+                    {repo_filter_sql}
                     OPTIONAL MATCH (called_file:File)-[:`CONTAINS`]->(called)
                     RETURN
                         called.name as called_function,
@@ -348,7 +354,7 @@ class CodeFinder:
                         call.full_call_name as full_call_name
                     ORDER BY called_is_dependency ASC, called_function
                     LIMIT 20
-                """, function_name=function_name, repo_path=repo_path)
+                """, **params)
             
             return result.data()
     
@@ -806,8 +812,7 @@ class CodeFinder:
                 variable_instances = session.run(f"""
                     MATCH (var:Variable {{name: @variable_name}})
                     WHERE (ENDS_WITH(var.path, @path) OR var.path = @path) {repo_filter}
-                    OPTIONAL MATCH (container)-[:`CONTAINS`]->(var)
-                    WHERE container:Function OR container:Class OR container:File
+                    OPTIONAL MATCH (container:Function|Class|File)-[:`CONTAINS`]->(var)
                     OPTIONAL MATCH (file:File)-[:`CONTAINS`]->(var)
                     RETURN
                         var.name as variable_name,
@@ -832,8 +837,7 @@ class CodeFinder:
                 variable_instances = session.run(f"""
                     MATCH (var:Variable {{name: @variable_name}})
                     WHERE 1=1 {repo_filter}
-                    OPTIONAL MATCH (container)-[:`CONTAINS`]->(var)
-                    WHERE container:Function OR container:Class OR container:File
+                    OPTIONAL MATCH (container:Function|Class|File)-[:`CONTAINS`]->(var)
                     OPTIONAL MATCH (file:File)-[:`CONTAINS`]->(var)
                     RETURN
                         var.name as variable_name,
@@ -970,7 +974,7 @@ class CodeFinder:
                 results = self.find_module_dependencies(target, repo_path=repo_path)
                 return {
                     "query_type": "module_dependencies", "target": target, "results": results,
-                    "summary": f"Module '{target}' is imported by {len(results['imported_by_files'])} files"
+                    "summary": f"Module '{target}' is imported by {len(results.get('importers', []))} files"
                 }
             
             elif query_type in ["variable_scope", "var_scope", "variable_usage_scope"]:
