@@ -473,81 +473,109 @@ class SpannerSessionWrapper:
             return pt
 
         batch_statements = []
+        edge_merges = []
 
         for sql_op in translations:
             if isinstance(sql_op, tuple):
                 sql_query, sql_params = sql_op
                 batch_statements.append((sql_query, sql_params, get_ptypes(sql_params)))
             elif isinstance(sql_op, dict) and sql_op.get("type") == "edge_merge":
-                prefix = sql_op["match_query_prefix"]
-                src_var, dst_var = sql_op["src_var"], sql_op["dst_var"]
-                src_pk, dst_pk = sql_op["src_pk"], sql_op["dst_pk"]
-                
-                params = sql_op["original_parameters"]
-                
-                # Use bound generated PKs from same-transaction MERGE operations if available
-                src_val = params.get(f"{src_var}_pk", params.get(src_pk))
-                dst_val = params.get(f"{dst_var}_pk", params.get(dst_pk))
-                
-                # Determine mapping values from GQL lookup if not provided directly
-                fields_to_return = []
-                if not src_val:
-                    fields_to_return.append(f"{src_var}.{src_pk} AS src_pk_val")
-                if not dst_val:
-                    fields_to_return.append(f"{dst_var}.{dst_pk} AS dst_pk_val")
-                    
-                rows = []
-                if fields_to_return:
-                    match_lines = [line.strip() for line in prefix.split("\n") if re.match(r'^(MATCH|OPTIONAL MATCH|WITH|WHERE)\b', line.strip(), re.IGNORECASE)]
-                    gql_prefix = "\n".join(match_lines)
-                    if gql_prefix:
-                        import time
-                        gql_query = gql_prefix + "\nRETURN " + ", ".join(fields_to_return)
-                        formatted_gql, formatted_params = self._format_gql(gql_query, params)
-                        t0 = time.time()
-                        results = transaction.execute_sql(formatted_gql, params=formatted_params)
-                        rows = [dict(zip([f.name for f in results.fields], row)) for row in results]
-                        t1 = time.time()
-                        if not hasattr(self, '_execute_sql_time'): self._execute_sql_time = 0
-                        self._execute_sql_time += (t1 - t0)
-                        
-                        # Hack to print cumulative time occasionally
-                        if not hasattr(self, '_execute_sql_count'): self._execute_sql_count = 0
-                        self._execute_sql_count += 1
-                        if True:
-                            print(f"[Spanner Performance] Cumulative execute_sql lookups: {self._execute_sql_count} calls, total time: {self._execute_sql_time:.2f}s", flush=True)
-                        
-                # Fallback if logic is a pure MERGE without MATCH sequence or no rows found
-                if not rows:
-                    rows = [{}]
+                edge_merges.append(sql_op)
 
-                for row in rows:
-                    final_src_val = src_val or row.get("src_pk_val") or params.get(src_pk) or f"dummy_{src_var}"
-                    final_dst_val = dst_val or row.get("dst_pk_val") or params.get(dst_pk) or f"dummy_{dst_var}"
-                        
-                    edge_label = sql_op["edge_label"]
-                    edge_props_raw = sql_op["edge_props_raw"]
-                    edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{edge_label}_{final_src_val}_{final_dst_val}_{edge_props_raw}"))
-                    
-                    final_sql_params = sql_op["sql_params"].copy()
-                    final_sql_params["id"] = edge_id
-                    final_sql_params["src_id"] = final_src_val
-                    final_sql_params["dst_id"] = final_dst_val
-                    
-                    cols, vals = [] , []
-                    insert_params = {}
-                    for c, v in final_sql_params.items():
-                        if isinstance(v, dict):
-                            cols.append(c)
-                            vals.append(f"PARSE_JSON(@{c})")
-                            insert_params[c] = json.dumps(v)
+        # PASS 1: Bulk Resolution
+        scalar_subqueries = []
+        combined_params = {}
+        lookup_mappings = {}
+        
+        for idx, op in enumerate(edge_merges):
+            params = op["original_parameters"]
+            match_lookups = op.get("match_lookups", {})
+            src_var, dst_var = op["src_var"], op["dst_var"]
+            src_pk, dst_pk = op["src_pk"], op["dst_pk"]
+            
+            src_val = params.get(f"{src_var}_pk", params.get(src_pk))
+            dst_val = params.get(f"{dst_var}_pk", params.get(dst_pk))
+            
+            op["_src_val"] = src_val
+            op["_dst_val"] = dst_val
+            
+            def add_lookup(var, pk, role):
+                if var in match_lookups:
+                    alias = f"e{idx}_{role}"
+                    lookup_mappings[(idx, role)] = alias
+                    table = match_lookups[var]["table"]
+                    pk_col = match_lookups[var]["pk"]
+                    criteria = match_lookups[var]["criteria"]
+                    sql_criteria = []
+                    for k, param_type, v in criteria:
+                        if param_type == 'param':
+                            unique_p_name = f"{alias}_{v}"
+                            sql_criteria.append(f"{k} = @{unique_p_name}")
+                            combined_params[unique_p_name] = params.get(v)
                         else:
-                            cols.append(c)
-                            vals.append(f"@{c}")
-                            insert_params[c] = v
-                    
-                    sql = f"INSERT OR UPDATE `{edge_label}` ({', '.join(cols)}) VALUES ({', '.join(vals)})"
-                    batch_statements.append((sql, insert_params, get_ptypes(insert_params)))
+                            sql_criteria.append(f"{k} = {v}")
+                    subq = f"(SELECT {pk_col} FROM `{table}` WHERE {' AND '.join(sql_criteria)} LIMIT 1) AS {alias}"
+                    scalar_subqueries.append(subq)
+
+            if not src_val: add_lookup(src_var, src_pk, "src")
+            if not dst_val: add_lookup(dst_var, dst_pk, "dst")
+
+        resolved_ids = {}
+        if scalar_subqueries:
+            import time
+            t0 = time.time()
+            CHUNK_SIZE = 500
+            for i in range(0, len(scalar_subqueries), CHUNK_SIZE):
+                chunk_sq = scalar_subqueries[i:i+CHUNK_SIZE]
+                chunk_sql = f"SELECT {', '.join(chunk_sq)}"
+                chunk_params = {k: v for k, v in combined_params.items() if f"@{k}" in chunk_sql}
+                results = transaction.execute_sql(chunk_sql, params=chunk_params)
+                for row in results:
+                    resolved_ids.update(dict(zip([f.name for f in results.fields], row)))
+            t1 = time.time()
+            if not hasattr(self, '_execute_sql_time'): self._execute_sql_time = 0
+            self._execute_sql_time += (t1 - t0)
+            if not hasattr(self, '_execute_sql_count'): self._execute_sql_count = 0
+            self._execute_sql_count += 1
+            print(f"[Spanner Performance] Cumulative batched lookups: {self._execute_sql_count} chunk calls, total time: {self._execute_sql_time:.2f}s", flush=True)
+
+        # PASS 2: DML Construction
+        for idx, op in enumerate(edge_merges):
+            src_var, dst_var = op["src_var"], op["dst_var"]
+            src_pk, dst_pk = op["src_pk"], op["dst_pk"]
+            params = op["original_parameters"]
+            
+            src_alias = lookup_mappings.get((idx, "src"))
+            dst_alias = lookup_mappings.get((idx, "dst"))
+            fetched_src = resolved_ids.get(src_alias) if src_alias else None
+            fetched_dst = resolved_ids.get(dst_alias) if dst_alias else None
+            
+            final_src_val = op["_src_val"] or fetched_src or params.get(src_pk) or f"dummy_{src_var}"
+            final_dst_val = op["_dst_val"] or fetched_dst or params.get(dst_pk) or f"dummy_{dst_var}"
+            
+            edge_label = op["edge_label"]
+            edge_props_raw = op["edge_props_raw"]
+            edge_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{edge_label}_{final_src_val}_{final_dst_val}_{edge_props_raw}"))
+            
+            final_sql_params = op["sql_params"].copy()
+            final_sql_params["id"] = edge_id
+            final_sql_params["src_id"] = final_src_val
+            final_sql_params["dst_id"] = final_dst_val
+            
+            cols, vals = [] , []
+            insert_params = {}
+            for c, v in final_sql_params.items():
+                if isinstance(v, dict):
+                    cols.append(c)
+                    vals.append(f"PARSE_JSON(@{c})")
+                    insert_params[c] = json.dumps(v)
+                else:
+                    cols.append(c)
+                    vals.append(f"@{c}")
+                    insert_params[c] = v
+            
+            sql = f"INSERT OR UPDATE `{edge_label}` ({', '.join(cols)}) VALUES ({', '.join(vals)})"
+            batch_statements.append((sql, insert_params, get_ptypes(insert_params)))
 
         if batch_statements:
             for i in range(0, len(batch_statements), 50):
@@ -762,12 +790,11 @@ class SpannerSessionWrapper:
                         k = k.strip()
                         v_raw = v_raw.strip()
                         if v_raw.startswith('$'):
-                            # For parameterized matches, we just pass the param name (e.g. '@context') into the subquery
-                            mwhere.append(f"{k} = @{v_raw[1:]}")
+                            mwhere.append([k, 'param', v_raw[1:]])
                         else:
-                            mwhere.append(f"{k} = {v_raw}")
+                            mwhere.append([k, 'literal', v_raw])
                 if mwhere:
-                    match_lookups[mnode_var] = f"(SELECT {mpk_name} FROM `{mnode_label}` WHERE {' AND '.join(mwhere)} LIMIT 1)"
+                    match_lookups[mnode_var] = {"table": mnode_label, "pk": mpk_name, "criteria": mwhere}
 
             # 2. Edge MERGE extraction
             # e.g., MERGE (a)-[r:LABEL {props}]->(b) or MERGE (a)-[:LABEL]->(b)
@@ -872,6 +899,7 @@ class SpannerSessionWrapper:
                     "dst_var": dst_var,
                     "src_pk": src_pk,
                     "dst_pk": dst_pk,
+                    "match_lookups": match_lookups,
                     "match_query_prefix": query[:merge_edge_match.start()],
                     "original_parameters": parameters
                 })
