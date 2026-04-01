@@ -715,6 +715,7 @@ class GraphBuilder:
         
         for call in file_data.get('function_calls', []):
             called_name = call['name']
+            caller_context = call.get('caller_context')
             # debug_log(f"Processing call: {called_name}")
             if called_name in __builtins__: continue
 
