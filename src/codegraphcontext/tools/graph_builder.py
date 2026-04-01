@@ -1,6 +1,7 @@
 
 # src/codegraphcontext/tools/graph_builder.py
 import asyncio
+import uuid
 import pathspec
 from pathlib import Path
 from typing import Any, Coroutine, Dict, Optional, Tuple
