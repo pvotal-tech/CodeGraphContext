@@ -2056,12 +2056,12 @@ class GraphBuilder:
                 "match_lookups": {
                     "repo": {
                         "table": "Repository",
-                        "pk": "uid",
+                        "pk": "path",
                         "criteria": [["path", "param", "repo_path"]]
                     },
                     "file": {
                         "table": "File",
-                        "pk": "uid",
+                        "pk": "path",
                         "criteria": [["path", "param", "file_path"]]
                     }
                 },
@@ -2071,8 +2071,8 @@ class GraphBuilder:
                 },
                 "src_var": "repo",
                 "dst_var": "file",
-                "src_pk": "uid",
-                "dst_pk": "uid",
+                "src_pk": "path",
+                "dst_pk": "path",
                 "edge_props_raw": ""
             })
 
@@ -2103,12 +2103,12 @@ class GraphBuilder:
                     "match_lookups": {
                         "parent": {
                             "table": parent_label,
-                            "pk": "uid",
+                            "pk": "path",
                             "criteria": [["path", "param", "parent_path"]]
                         },
                         "child": {
                             "table": "Directory",
-                            "pk": "uid",
+                            "pk": "path",
                             "criteria": [["path", "param", "current_path"]]
                         }
                     },
@@ -2118,8 +2118,8 @@ class GraphBuilder:
                     },
                     "src_var": "parent",
                     "dst_var": "child",
-                    "src_pk": "uid",
-                    "dst_pk": "uid",
+                    "src_pk": "path",
+                    "dst_pk": "path",
                     "edge_props_raw": ""
                 })
 
@@ -2136,12 +2136,12 @@ class GraphBuilder:
                 "match_lookups": {
                     "parent": {
                         "table": parent_label,
-                        "pk": "uid",
+                        "pk": "path",
                         "criteria": [["path", "param", "parent_path"]]
                     },
                     "child": {
                         "table": "File",
-                        "pk": "uid",
+                        "pk": "path",
                         "criteria": [["path", "param", "file_path"]]
                     }
                 },
@@ -2151,7 +2151,7 @@ class GraphBuilder:
                 },
                 "src_var": "parent",
                 "dst_var": "child",
-                "src_pk": "uid",
-                "dst_pk": "uid",
+                "src_pk": "path",
+                "dst_pk": "path",
                 "edge_props_raw": ""
             })
