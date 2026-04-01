@@ -522,8 +522,6 @@ class SpannerSessionWrapper:
 
         resolved_ids = {}
         if scalar_subqueries:
-            import time
-            t0 = time.time()
             CHUNK_SIZE = 500
             for i in range(0, len(scalar_subqueries), CHUNK_SIZE):
                 chunk_sq = scalar_subqueries[i:i+CHUNK_SIZE]
@@ -532,12 +530,6 @@ class SpannerSessionWrapper:
                 results = transaction.execute_sql(chunk_sql, params=chunk_params)
                 for row in results:
                     resolved_ids.update(dict(zip([f.name for f in results.fields], row)))
-            t1 = time.time()
-            if not hasattr(self, '_execute_sql_time'): self._execute_sql_time = 0
-            self._execute_sql_time += (t1 - t0)
-            if not hasattr(self, '_execute_sql_count'): self._execute_sql_count = 0
-            self._execute_sql_count += 1
-            print(f"[Spanner Performance] Cumulative batched lookups: {self._execute_sql_count} chunk calls, total time: {self._execute_sql_time:.2f}s", flush=True)
 
         # PASS 2: DML Construction
         for idx, op in enumerate(edge_merges):

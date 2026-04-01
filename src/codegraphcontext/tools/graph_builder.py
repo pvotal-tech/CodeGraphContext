@@ -942,7 +942,7 @@ class GraphBuilder:
         start_cache_prep = time.time()
         debug_log(f"_create_all_function_calls called with {len(all_file_data)} files")
         self._populate_resolution_cache(all_file_data)
-        print(f"[AST Processing] Resolution cache built in {time.time() - start_cache_prep:.2f} seconds.", flush=True)
+        debug_log(f"Resolution cache built in {time.time() - start_cache_prep:.2f} seconds.")
         
         with self.driver.session() as session:
             batch_support = hasattr(session, 'run_batch')
@@ -1808,9 +1808,7 @@ class GraphBuilder:
                         self.job_manager.update_job(job_id, current_file=str(file))
                     repo_path = path.resolve() if path.is_dir() else file.parent.resolve()
                     
-                    parse_t0 = time.time()
                     file_data = self.parse_file(repo_path, file, is_dependency)
-                    parse_t1 = time.time()
                     
                     rewrite_paths(file_data, repo_path, virtual_repo_name)
                     
@@ -1819,11 +1817,7 @@ class GraphBuilder:
                     # can still be represented as minimal File nodes in the graph.
                     if "error" not in file_data:
                         try:
-                            add_t0 = time.time()
                             self.add_file_to_graph(file_data, repo_name, imports_map)
-                            add_t1 = time.time()
-                            if parse_t1-parse_t0 > 0.1 or add_t1-add_t0 > 0.1:
-                                print(f"[AST Process] {file.name}: parsed in {parse_t1-parse_t0:.3f}s | added to batch in {add_t1-add_t0:.3f}s", flush=True)
                         except Exception as file_err:
                             # Re-raise with the offending file path so the user
                             # can identify which source file triggered the error.
