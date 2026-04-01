@@ -366,11 +366,9 @@ class CodeFinder:
                 MATCH (file:File)-[imp:IMPORTS]->(module:Module)
                 WHERE (module.name = @module_name OR STRPOS(LOWER(module.full_import_name), LOWER(@module_name)) > 0) {repo_filter}
                 OPTIONAL MATCH (repo:Repository)-[:`CONTAINS`]->(file)
-                WITH file, repo, COLLECT({{
-                    imported_module: module.name,
-                    import_alias: module.alias,
-                    full_import_name: module.full_import_name
-                }}) AS imports
+                WITH file, repo, ARRAY_AGG(
+                    STRUCT(module.name AS imported_module, module.full_import_name AS full_import_name)
+                ) AS imports
                 RETURN
                     file.name AS file_name,
                     file.path AS path,
@@ -390,31 +388,51 @@ class CodeFinder:
             repo_filter = "AND STARTS_WITH(container.path, @repo_path)" if repo_path else ""
             result = session.run(f"""
                 MATCH (var:Variable {{name: @variable_name}})
-                MATCH (container)-[:`CONTAINS`]->(var)
-                WHERE (container:Function OR container:Class OR container:File) {repo_filter}
+                MATCH (container:Function)-[:`CONTAINS`]->(var)
+                WHERE 1=1 {repo_filter}
                 OPTIONAL MATCH (file:File)-[:`CONTAINS`]->(container)
                 RETURN
-                    CASE 
-                        WHEN container:Function THEN container.name
-                        WHEN container:Class THEN container.name
-                        ELSE 'file_level'
-                    END as container_name,
-                    CASE 
-                        WHEN container:Function THEN 'function'
-                        WHEN container:Class THEN 'class'
-                        ELSE 'file'
-                    END as container_type,
+                    container.name as container_name,
+                    'function' as container_type,
                     COALESCE(container.path, file.path) as path,
                     container.line_number as container_line_number,
                     var.line_number as variable_line_number,
                     var.value as variable_value,
                     var.context as variable_context,
                     COALESCE(container.is_dependency, file.is_dependency, false) as is_dependency
-                ORDER BY is_dependency ASC, path, variable_line_number
-                LIMIT 20
+                UNION ALL
+                MATCH (var:Variable {{name: @variable_name}})
+                MATCH (container:Class)-[:`CONTAINS`]->(var)
+                WHERE 1=1 {repo_filter}
+                OPTIONAL MATCH (file:File)-[:`CONTAINS`]->(container)
+                RETURN
+                    container.name as container_name,
+                    'class' as container_type,
+                    COALESCE(container.path, file.path) as path,
+                    container.line_number as container_line_number,
+                    var.line_number as variable_line_number,
+                    var.value as variable_value,
+                    var.context as variable_context,
+                    COALESCE(container.is_dependency, file.is_dependency, false) as is_dependency
+                UNION ALL
+                MATCH (var:Variable {{name: @variable_name}})
+                MATCH (container:File)-[:`CONTAINS`]->(var)
+                WHERE 1=1 {repo_filter}
+                RETURN
+                    'file_level' as container_name,
+                    'file' as container_type,
+                    container.path as path,
+                    0 as container_line_number,
+                    var.line_number as variable_line_number,
+                    var.value as variable_value,
+                    var.context as variable_context,
+                    container.is_dependency as is_dependency
             """, variable_name=variable_name, repo_path=repo_path)
             
-            return result.data()
+            # Sort manually due to UNION ALL limits
+            all_records = result.data()
+            all_records.sort(key=lambda x: (x.get('is_dependency', False), x.get('path', ''), x.get('variable_line_number', 0)))
+            return all_records[:20]
     
     def find_class_hierarchy(self, class_name: str, path: Optional[str] = None, repo_path: Optional[str] = None) -> Dict[str, Any]:
         """Find class inheritance relationships using INHERITS relationships"""
