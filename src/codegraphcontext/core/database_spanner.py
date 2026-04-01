@@ -533,10 +533,7 @@ class SpannerSessionWrapper:
             vals_list = []
             for k, v in op["_params"].items():
                 cols_list.append(k)
-                if isinstance(v, dict):
-                    vals_list.append(spanner.JsonDict(v))
-                else:
-                    vals_list.append(v)
+                vals_list.append(v)
                     
             mutations_by_table[table].append({"cols": tuple(cols_list), "vals": vals_list})
 
@@ -569,10 +566,7 @@ class SpannerSessionWrapper:
             vals_list = []
             for k, v in final_sql_params.items():
                 cols_list.append(k)
-                if isinstance(v, dict):
-                    vals_list.append(spanner.JsonDict(v))
-                else:
-                    vals_list.append(v)
+                vals_list.append(v)
 
             mutations_by_table[edge_label].append({"cols": tuple(cols_list), "vals": vals_list})
             
